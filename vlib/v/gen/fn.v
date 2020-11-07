@@ -158,6 +158,15 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 		// TODO: remove this, when g.write_autofree_stmts_when_needed works properly
 		g.autofree_scope_vars(it.body_pos.pos)
 	}
+	if it.return_type != table.void_type && it.stmts.len > 0 && it.stmts.last() !is ast.Return {
+		default_expr := g.type_default(it.return_type)
+		// TODO: perf?
+		if default_expr == '{0}' {
+			g.writeln('\treturn ($type_name)$default_expr;')
+		} else {
+			g.writeln('\treturn $default_expr;')
+		}
+	}
 	g.writeln('}')
 	g.defer_stmts = []
 	if g.pref.printfn_list.len > 0 && g.last_fn_c_name in g.pref.printfn_list {
@@ -240,15 +249,7 @@ fn (mut g Gen) fn_args(args []table.Param, is_variadic bool) ([]string, []string
 				g.definitions.write(')')
 			}
 		} else {
-			mut nr_muls := arg.typ.nr_muls()
 			s := arg_type_name + ' ' + caname
-			if arg.is_mut {
-				// mut arg needs one *
-				nr_muls = 1
-			}
-			// if nr_muls > 0 && !is_varg {
-			// s = arg_type_name + strings.repeat(`*`, nr_muls) + ' ' + caname
-			// }
 			g.write(s)
 			g.definitions.write(s)
 			fargs << caname
@@ -526,7 +527,9 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			tmp2 = g.new_tmp_var()
 			g.writeln('Option_$typ $tmp2 = $fn_name ($json_obj);')
 		}
-		g.write('cJSON_Delete($json_obj);')
+		if !g.pref.autofree {
+			g.write('cJSON_Delete($json_obj); //del')
+		}
 		g.write('\n$cur_line')
 		name = ''
 		json_obj = tmp2
@@ -546,82 +549,94 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 	// cgen shouldn't modify ast nodes, this should be moved
 	// g.generate_tmp_autofree_arg_vars(node, name)
 	// Handle `print(x)`
+	mut print_auto_str := false
 	if is_print && node.args[0].typ != table.string_type { // && !free_tmp_arg_vars {
-		typ := node.args[0].typ
+		mut typ := node.args[0].typ
 		if typ == 0 {
 			g.checker_bug('print arg.typ is 0', node.pos)
 		}
-		mut styp := g.typ(typ)
-		sym := g.table.get_type_symbol(typ)
-		if typ.is_ptr() {
-			styp = styp.replace('*', '')
+		mut sym := g.table.get_type_symbol(typ)
+		if sym.info is table.Alias as alias_info {
+			typ = alias_info.parent_type
+			sym = g.table.get_type_symbol(alias_info.parent_type)
 		}
-		mut str_fn_name := g.gen_str_for_type_with_styp(typ, styp)
-		if g.autofree && !typ.has_flag(.optional) {
-			// Create a temporary variable so that the value can be freed
-			tmp := g.new_tmp_var()
-			// tmps << tmp
-			g.write('string $tmp = ${str_fn_name}(')
-			g.expr(node.args[0].expr)
-			g.writeln('); ${print_method}($tmp); string_free(&$tmp); //MEM2 $styp')
-		} else {
-			expr := node.args[0].expr
-			is_var := match expr {
-				ast.SelectorExpr { true }
-				ast.Ident { true }
-				else { false }
+		// check if alias parent also not a string
+		if typ != table.string_type {
+			mut styp := g.typ(typ)
+			if typ.is_ptr() {
+				styp = styp.replace('*', '')
 			}
-			if typ.is_ptr() && sym.kind != .struct_ {
-				// ptr_str() for pointers
-				styp = 'ptr'
-				str_fn_name = 'ptr_str'
-			}
-			if sym.kind == .enum_ {
-				if is_var {
-					g.write('${print_method}(${str_fn_name}(')
-				} else {
-					// when no var, print string directly
-					g.write('${print_method}(tos3("')
-				}
-				if typ.is_ptr() {
-					// dereference
-					g.write('*')
-				}
-				g.enum_expr(expr)
-				if !is_var {
-					// end of string
-					g.write('"')
-				}
+			mut str_fn_name := g.gen_str_for_type_with_styp(typ, styp)
+			if g.autofree && !typ.has_flag(.optional) {
+				// Create a temporary variable so that the value can be freed
+				tmp := g.new_tmp_var()
+				// tmps << tmp
+				g.write('string $tmp = ${str_fn_name}(')
+				g.expr(node.args[0].expr)
+				g.writeln('); ${print_method}($tmp); string_free(&$tmp); //MEM2 $styp')
 			} else {
-				g.write('${print_method}(${str_fn_name}(')
-				if typ.is_ptr() && sym.kind == .struct_ {
-					// dereference
-					g.write('*')
+				expr := node.args[0].expr
+				is_var := match expr {
+					ast.SelectorExpr { true }
+					ast.Ident { true }
+					else { false }
 				}
-				g.expr(expr)
+				if typ.is_ptr() && sym.kind != .struct_ {
+					// ptr_str() for pointers
+					styp = 'ptr'
+					str_fn_name = 'ptr_str'
+				}
+				if sym.kind == .enum_ {
+					if is_var {
+						g.write('${print_method}(${str_fn_name}(')
+					} else {
+						// when no var, print string directly
+						g.write('${print_method}(tos3("')
+					}
+					if typ.is_ptr() {
+						// dereference
+						g.write('*')
+					}
+					g.enum_expr(expr)
+					if !is_var {
+						// end of string
+						g.write('"')
+					}
+				} else {
+					g.write('${print_method}(${str_fn_name}(')
+					if typ.is_ptr() && sym.kind == .struct_ {
+						// dereference
+						g.write('*')
+					}
+					g.expr(expr)
+				}
+				g.write('))')
 			}
-			g.write('))')
+			print_auto_str = true
 		}
-	} else if g.pref.is_debug && node.name == 'panic' {
-		paline, pafile, pamod, pafn := g.panic_debug_info(node.pos)
-		g.write('panic_debug($paline, tos3("$pafile"), tos3("$pamod"), tos3("$pafn"),  ')
-		// g.call_args(node.args, node.expected_arg_types) // , [])
-		g.call_args(node)
-		g.write(')')
-	} else {
-		// Simple function call
-		// if free_tmp_arg_vars {
-		// g.writeln(';')
-		// g.write(cur_line + ' /* <== af cur line*/')
-		// }
-		g.write('${g.get_ternary_name(name)}(')
-		if g.is_json_fn {
-			g.write(json_obj)
-		} else {
-			// g.call_args(node.args, node.expected_arg_types) // , tmp_arg_vars_to_free)
+	}
+	if !print_auto_str {
+		if g.pref.is_debug && node.name == 'panic' {
+			paline, pafile, pamod, pafn := g.panic_debug_info(node.pos)
+			g.write('panic_debug($paline, tos3("$pafile"), tos3("$pamod"), tos3("$pafn"),  ')
+			// g.call_args(node.args, node.expected_arg_types) // , [])
 			g.call_args(node)
+			g.write(')')
+		} else {
+			// Simple function call
+			// if free_tmp_arg_vars {
+			// g.writeln(';')
+			// g.write(cur_line + ' /* <== af cur line*/')
+			// }
+			g.write('${g.get_ternary_name(name)}(')
+			if g.is_json_fn {
+				g.write(json_obj)
+			} else {
+				// g.call_args(node.args, node.expected_arg_types) // , tmp_arg_vars_to_free)
+				g.call_args(node)
+			}
+			g.write(')')
 		}
-		g.write(')')
 	}
 	g.is_c_call = false
 	g.is_json_fn = false
@@ -634,6 +649,9 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 	mut free_tmp_arg_vars := g.autofree && g.pref.experimental && !g.is_builtin_mod &&
 		node.args.len > 0 && !node.args[0].typ.has_flag(.optional) // TODO copy pasta checker.v
 	if !free_tmp_arg_vars {
+		return
+	}
+	if g.is_js_call {
 		return
 	}
 	free_tmp_arg_vars = false // set the flag to true only if we have at least one arg to free
@@ -692,7 +710,7 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 		g.strs_to_free0 << s
 		// Now free the tmp arg vars right after the function call
 		// g.strs_to_free << t
-		g.nr_vars_to_free++
+		// g.nr_vars_to_free++
 		// g.strs_to_free << 'string_free(&$t);'
 	}
 }
@@ -703,10 +721,12 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 		return
 	}
 	*/
+	/*
+	g.writeln('\n/* strs_to_free3: $g.nr_vars_to_free */')
 	if g.nr_vars_to_free <= 0 {
 		return
 	}
-	// g.writeln('\n/* strs_to_free3: */')
+	*/
 	/*
 	for s in g.strs_to_free {
 		g.writeln('string_free(&$s);')
@@ -717,6 +737,11 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 		g.strs_to_free = []
 	}
 	*/
+	if g.inside_vweb_tmpl {
+		return
+	}
+	g.doing_autofree_tmp = true
+	// g.write('/* postgen */')
 	scope := g.file.scope.innermost(node_pos)
 	for _, obj in scope.objects {
 		match mut obj {
@@ -740,11 +765,13 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 				}
 				obj.is_used = true
 				g.autofree_variable(v)
-				g.nr_vars_to_free--
+				// g.nr_vars_to_free--
 			}
 			else {}
 		}
 	}
+	// g.write('/* postgen end */')
+	g.doing_autofree_tmp = false
 }
 
 fn (mut g Gen) call_args(node ast.CallExpr) {
@@ -778,7 +805,7 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			if is_interface {
 				g.expr(arg.expr)
 			} else if use_tmp_var_autofree {
-				if arg.is_tmp_autofree {
+				if arg.is_tmp_autofree { // && !g.is_js_call {
 					// We saved expressions in temp variables so that they can be freed later.
 					// `foo(str + str2) => x := str + str2; foo(x); x.free()`
 					// g.write('_arg_expr_${g.called_fn_name}_$i')

@@ -54,6 +54,7 @@ pub fn (mut p Parser) call_expr(language table.Language, mod string) ast.CallExp
 		len: last_pos.pos - first_pos.pos + last_pos.len
 	}
 	mut or_stmts := []ast.Stmt{}
+	mut or_pos := p.tok.position()
 	if p.tok.kind == .key_orelse {
 		// `foo() or {}``
 		was_inside_or_expr := p.inside_or_expr
@@ -74,6 +75,7 @@ pub fn (mut p Parser) call_expr(language table.Language, mod string) ast.CallExp
 		})
 		or_kind = .block
 		or_stmts = p.parse_block_no_scope(false)
+		or_pos = or_pos.extend(p.prev_tok.position())
 		p.close_scope()
 		p.inside_or_expr = was_inside_or_expr
 	}
@@ -89,37 +91,18 @@ pub fn (mut p Parser) call_expr(language table.Language, mod string) ast.CallExp
 			fn_name = registered.name
 		}
 	}
-	/*
-	call_expr := ast.CallExpr{
-		name: fn_name
-		args: args
-		mod: fn_mod
-		pos: pos
-		language: language
-		generic_type: generic_type
-	}
-	if or_kind != .absent {
-		return ast.OrExpr2{
-			call_expr: call_expr
-			stmts: or_stmts
-			kind: or_kind
-			pos: pos
-		}
-	}
-	return call_expr
-	*/
 	return ast.CallExpr{
 		name: fn_name
 		args: args
 		mod: fn_mod
 		pos: pos
 		language: language
+		generic_type: generic_type
 		or_block: ast.OrExpr{
 			stmts: or_stmts
 			kind: or_kind
-			pos: pos
+			pos: or_pos
 		}
-		generic_type: generic_type
 	}
 }
 
@@ -258,6 +241,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 		for param in params {
 			if p.scope.known_var(param.name) {
 				p.error_with_pos('redefinition of parameter `$param.name`', param.pos)
+				break
 			}
 			p.scope.register(param.name, ast.Var{
 				name: param.name
@@ -456,6 +440,7 @@ fn (mut p Parser) fn_args() ([]table.Param, bool, bool) {
 					}
 				} else if is_shared || is_atomic {
 					p.error_with_pos('generic object cannot be `atomic`or `shared`', pos)
+					break
 				}
 				// if arg_type.is_ptr() {
 				// p.error('cannot mut')
@@ -476,6 +461,7 @@ fn (mut p Parser) fn_args() ([]table.Param, bool, bool) {
 				if is_variadic {
 					p.error_with_pos('cannot use ...(variadic) with non-final parameter no $arg_no',
 						pos)
+					break
 				}
 				p.next()
 			}
@@ -488,6 +474,10 @@ fn (mut p Parser) fn_args() ([]table.Param, bool, bool) {
 				type_source_name: sym.source_name
 			}
 			arg_no++
+			if arg_no > 1024 {
+				p.error_with_pos('too many args', pos)
+				break
+			}
 		}
 	} else {
 		for p.tok.kind != .rpar {
@@ -532,6 +522,7 @@ fn (mut p Parser) fn_args() ([]table.Param, bool, bool) {
 				} else if is_shared || is_atomic {
 					p.error_with_pos('generic object cannot be `atomic` or `shared`',
 						pos)
+					break
 				}
 				typ = typ.set_nr_muls(1)
 				if is_shared {
@@ -557,6 +548,7 @@ fn (mut p Parser) fn_args() ([]table.Param, bool, bool) {
 				if is_variadic && p.tok.kind == .comma {
 					p.error_with_pos('cannot use ...(variadic) with non-final parameter $arg_name',
 						arg_pos[i])
+					break
 				}
 			}
 			if p.tok.kind != .rpar {

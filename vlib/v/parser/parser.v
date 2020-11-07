@@ -585,10 +585,12 @@ pub fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 				}
 				if p.peek_tok.kind == .colon {
 					// `label:`
+					spos := p.tok.position()
 					name := p.check_name()
 					p.next()
 					return ast.GotoLabel{
 						name: name
+						pos: spos.extend(p.tok.position())
 					}
 				} else if p.peek_tok.kind == .name {
 					p.error_with_pos('unexpected name `$p.peek_tok.lit`', p.peek_tok.position())
@@ -624,7 +626,8 @@ pub fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 			tok := p.tok
 			p.next()
 			return ast.BranchStmt{
-				tok: tok
+				kind: tok.kind
+				pos: tok.position()
 			}
 		}
 		.key_unsafe {
@@ -635,25 +638,31 @@ pub fn (mut p Parser) stmt(is_top_level bool) ast.Stmt {
 		}
 		.key_defer {
 			p.next()
+			spos := p.tok.position()
 			stmts := p.parse_block()
 			return ast.DeferStmt{
 				stmts: stmts
+				pos: spos.extend(p.tok.position())
 			}
 		}
 		.key_go {
 			p.next()
+			spos := p.tok.position()
 			expr := p.expr(0)
 			// mut call_expr := &ast.CallExpr(0) // TODO
 			// { call_expr = it }
 			return ast.GoStmt{
 				call_expr: expr
+				pos: spos.extend(p.tok.position())
 			}
 		}
 		.key_goto {
 			p.next()
+			spos := p.tok.position()
 			name := p.check_name()
 			return ast.GotoStmt{
 				name: name
+				pos: spos
 			}
 		}
 		.key_const {
@@ -766,27 +775,6 @@ fn (mut p Parser) parse_attr() table.Attr {
 	}
 }
 
-/*
-fn (mut p Parser) range_expr(low ast.Expr) ast.Expr {
-	// ,table.Type) {
-	if p.tok.kind != .dotdot {
-		p.next()
-	}
-	p.check(.dotdot)
-	mut high := ast.Expr{}
-	if p.tok.kind != .rsbr {
-		high = p.expr(0)
-		// if typ.typ.kind != .int {
-		// p.error('non-integer index `$typ.typ.name`')
-		// }
-	}
-	node := ast.RangeExpr{
-		low: low
-		high: high
-	}
-	return node
-}
-*/
 pub fn (mut p Parser) error(s string) {
 	p.error_with_pos(s, p.tok.position())
 }
@@ -812,6 +800,13 @@ pub fn (mut p Parser) error_with_pos(s string, pos token.Position) {
 			reporter: .parser
 			message: s
 		}
+	}
+	if p.pref.output_mode == .silent {
+		// Normally, parser errors mean that the parser exits immediately, so there can be only 1 parser error.
+		// In the silent mode however, the parser continues to run, even though it would have stopped. Some
+		// of the parser logic does not expect that, and may loop forever.
+		// The p.next() here is needed, so the parser is more robust, and *always* advances, even in the -silent mode.
+		p.next()
 	}
 }
 
@@ -870,6 +865,7 @@ fn (mut p Parser) parse_multi_expr(is_top_level bool) ast.Stmt {
 	return ast.ExprStmt{
 		expr: ast.ConcatExpr{
 			vals: left
+			pos: tok.position()
 		}
 		pos: tok.position()
 		comments: left_comments
@@ -926,6 +922,7 @@ pub fn (mut p Parser) parse_ident(language table.Language) ast.Ident {
 	} else {
 		p.error('unexpected token `$p.tok.lit`')
 	}
+	return ast.Ident{}
 }
 
 pub fn (mut p Parser) name_expr() ast.Expr {
@@ -960,6 +957,7 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 		}
 		return ast.MapInit{
 			typ: map_type
+			pos: p.tok.position()
 		}
 	}
 	// `chan typ{...}`
@@ -1032,13 +1030,28 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 		p.expr_mod = mod
 	}
 	lit0_is_capital := p.tok.lit[0].is_capital()
+	// use heuristics to detect `func<T>()` from `var < expr`
+	is_generic_call := !lit0_is_capital && p.peek_tok.kind == .lt && (match p.peek_tok2.kind {
+		.name {
+			// maybe `f<int>`, `f<map[`
+			(p.peek_tok2.kind == .name &&
+				p.peek_tok3.kind == .gt) ||
+				(p.peek_tok2.lit == 'map' && p.peek_tok3.kind == .lsbr)
+		}
+		.lsbr {
+			// maybe `f<[]T>`, assume `var < []` is invalid
+			p.peek_tok3.kind == .rsbr
+		}
+		else {
+			false
+		}
+	})
 	// p.warn('name expr  $p.tok.lit $p.peek_tok.str()')
 	same_line := p.tok.line_nr == p.peek_tok.line_nr
 	// `(` must be on same line as name token otherwise it's a ParExpr
 	if !same_line && p.peek_tok.kind == .lpar {
 		node = p.parse_ident(language)
-	} else if p.peek_tok.kind == .lpar ||
-		(p.peek_tok.kind == .lt && !lit0_is_capital && p.peek_tok2.kind == .name && p.peek_tok3.kind == .gt) {
+	} else if p.peek_tok.kind == .lpar || is_generic_call {
 		// foo(), foo<int>() or type() cast
 		mut name := p.tok.lit
 		if mod.len > 0 {
@@ -1052,6 +1065,7 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 			is_mod_cast || (!(name.len > 1 && name[0] == `C` && name[1] == `.`) && name[0].is_capital()) {
 			// MainLetter(x) is *always* a cast, as long as it is not `C.`
 			// TODO handle C.stat()
+			start_pos := p.tok.position()
 			mut to_typ := p.parse_type()
 			if p.is_amp {
 				// Handle `&Foo(0)`
@@ -1072,13 +1086,14 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 				arg = p.expr(0) // len
 				has_arg = true
 			}
+			end_pos := p.tok.position()
 			p.check(.rpar)
 			node = ast.CastExpr{
 				typ: to_typ
 				expr: expr
 				arg: arg
 				has_arg: has_arg
-				pos: expr.position()
+				pos: start_pos.extend(end_pos)
 			}
 			p.expr_mod = ''
 			return node
@@ -1144,6 +1159,7 @@ fn (mut p Parser) index_expr(left ast.Expr) ast.IndexExpr {
 				low: ast.Expr{}
 				high: high
 				has_high: true
+				pos: pos
 			}
 		}
 	}
@@ -1167,6 +1183,7 @@ fn (mut p Parser) index_expr(left ast.Expr) ast.IndexExpr {
 				high: high
 				has_high: has_high
 				has_low: has_low
+				pos: pos
 			}
 		}
 	}
@@ -1237,6 +1254,7 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		p.check(.rpar)
 		mut or_stmts := []ast.Stmt{}
 		mut or_kind := ast.OrKind.absent
+		mut or_pos := p.tok.position()
 		if p.tok.kind == .key_orelse {
 			p.next()
 			p.open_scope()
@@ -1254,6 +1272,7 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 			})
 			or_kind = .block
 			or_stmts = p.parse_block_no_scope(false)
+			or_pos = or_pos.extend(p.prev_tok.position())
 			p.close_scope()
 		}
 		// `foo()?`
@@ -1277,7 +1296,7 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 			or_block: ast.OrExpr{
 				stmts: or_stmts
 				kind: or_kind
-				pos: pos
+				pos: or_pos
 			}
 		}
 		if is_filter || field_name == 'sort' {
@@ -1550,7 +1569,7 @@ fn (mut p Parser) import_syms(mut parent ast.Import) {
 		alias := p.check_name()
 		name := '$parent.mod\.$alias'
 		if alias[0].is_capital() {
-			idx := p.table.add_placeholder_type(name)
+			idx := p.table.add_placeholder_type(name, .v)
 			typ := table.new_type(idx)
 			prepend_mod_name := p.prepend_mod(alias)
 			p.table.register_type_symbol(table.TypeSymbol{
@@ -1562,6 +1581,7 @@ fn (mut p Parser) import_syms(mut parent ast.Import) {
 				info: table.Alias{
 					parent_type: typ
 					language: table.Language.v
+					is_import: true
 				}
 				is_public: false
 			})

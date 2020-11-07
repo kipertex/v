@@ -294,12 +294,7 @@ pub fn (mut v Builder) cc_msvc() {
 	cmd := '"$r.full_cl_exe_path" @$out_name_cmd_line'
 	// It is hard to see it at first, but the quotes above ARE balanced :-| ...
 	// Also the double quotes at the start ARE needed.
-	if v.pref.is_verbose {
-		println('\n========== cl cmd line:')
-		println(cmd)
-		println('==========\n')
-	}
-	// println('$cmd')
+	v.show_cc(cmd, out_name_cmd_line, args)
 	ticks := time.ticks()
 	res := os.exec(cmd) or {
 		println(err)
@@ -308,7 +303,11 @@ pub fn (mut v Builder) cc_msvc() {
 	}
 	diff := time.ticks() - ticks
 	v.timing_message('C msvc', diff)
-	v.post_process_c_compiler_output(res)
+	if v.pref.show_c_output {
+		v.show_c_compiler_output(res)
+	} else {
+		v.post_process_c_compiler_output(res)
+	}
 	// println(res)
 	// println('C OUTPUT:')
 	// Always remove the object file - it is completely unnecessary

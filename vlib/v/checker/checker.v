@@ -2,7 +2,9 @@
 // Use of this source code is governed by an MIT license that can be found in the LICENSE file.
 module checker
 
+import os
 import v.ast
+import v.vmod
 import v.table
 import v.token
 import v.pref
@@ -26,38 +28,39 @@ const (
 )
 
 pub struct Checker {
-	pref             &pref.Preferences // Preferences shared from V struct
+	pref              &pref.Preferences // Preferences shared from V struct
 pub mut:
-	table            &table.Table
-	file             ast.File
-	nr_errors        int
-	nr_warnings      int
-	errors           []errors.Error
-	warnings         []errors.Warning
-	error_lines      []int // to avoid printing multiple errors for the same line
-	expected_type    table.Type
-	cur_fn           &ast.FnDecl // current function
-	const_decl       string
-	const_deps       []string
-	const_names      []string
-	global_names     []string
-	locked_names     []string // vars that are currently locked
-	rlocked_names    []string // vars that are currently read-locked
-	in_for_count     int // if checker is currently in a for loop
+	table             &table.Table
+	file              ast.File
+	nr_errors         int
+	nr_warnings       int
+	errors            []errors.Error
+	warnings          []errors.Warning
+	error_lines       []int // to avoid printing multiple errors for the same line
+	expected_type     table.Type
+	cur_fn            &ast.FnDecl // current function
+	const_decl        string
+	const_deps        []string
+	const_names       []string
+	global_names      []string
+	locked_names      []string // vars that are currently locked
+	rlocked_names     []string // vars that are currently read-locked
+	in_for_count      int // if checker is currently in a for loop
 	// checked_ident  string // to avoid infinite checker loops
-	returns          bool
-	scope_returns    bool
-	mod              string // current module name
-	is_builtin_mod   bool // are we in `builtin`?
-	inside_unsafe    bool
-	skip_flags       bool // should `#flag` and `#include` be skipped
-	cur_generic_type table.Type
+	returns           bool
+	scope_returns     bool
+	mod               string // current module name
+	is_builtin_mod    bool // are we in `builtin`?
+	inside_unsafe     bool
+	skip_flags        bool // should `#flag` and `#include` be skipped
+	cur_generic_type  table.Type
 mut:
-	expr_level       int // to avoid infinite recursion segfaults due to compiler bugs
-	inside_sql       bool // to handle sql table fields pseudo variables
-	cur_orm_ts       table.TypeSymbol
-	error_details    []string
-	generic_funcs    []&ast.FnDecl
+	expr_level        int // to avoid infinite recursion segfaults due to compiler bugs
+	inside_sql        bool // to handle sql table fields pseudo variables
+	cur_orm_ts        table.TypeSymbol
+	error_details     []string
+	generic_funcs     []&ast.FnDecl
+	vmod_file_content string // needed for @VMOD_FILE, contents of the file, *NOT its path*
 }
 
 pub fn new_checker(table &table.Table, pref &pref.Preferences) Checker {
@@ -448,7 +451,8 @@ pub fn (mut c Checker) struct_init(mut struct_init ast.StructInit) table.Type {
 			return table.void_type
 		}
 	}
-	if !type_sym.is_public && type_sym.kind != .placeholder && type_sym.mod != c.mod {
+	if !type_sym.is_public && type_sym.kind != .placeholder && type_sym.mod != c.mod &&
+		type_sym.language != .c {
 		c.error('type `$type_sym.source_name` is private', struct_init.pos)
 	}
 	match type_sym.kind {
@@ -1002,7 +1006,12 @@ pub fn (mut c Checker) call_expr(mut call_expr ast.CallExpr) table.Type {
 			if arg.typ != table.string_type {
 				continue
 			}
-			if arg.expr is ast.Ident || arg.expr is ast.StringLiteral {
+			if arg.expr is ast.Ident ||
+				arg.expr is ast.StringLiteral || arg.expr is ast.SelectorExpr {
+				// Simple expressions like variables, string literals, selector expressions
+				// (`x.field`) can't result in allocations and don't need to be assigned to
+				// temporary vars.
+				// Only expressions like `str + 'b'` need to be freed.
 				continue
 			}
 			call_expr.args[i].is_tmp_autofree = true
@@ -1579,7 +1588,10 @@ fn (mut c Checker) type_implements(typ table.Type, inter_typ table.Type, pos tok
 	for imethod in inter_sym.methods {
 		if method := typ_sym.find_method(imethod.name) {
 			if !imethod.is_same_method_as(method) {
-				c.error('`$styp` incorrectly implements method `$imethod.name` of interface `$inter_sym.source_name`, expected `${c.table.fn_to_str(imethod)}`',
+				sig := c.table.fn_signature(imethod, {
+					skip_receiver: true
+				})
+				c.error('`$styp` incorrectly implements method `$imethod.name` of interface `$inter_sym.source_name`, expected `$sig`',
 					pos)
 				return false
 			}
@@ -1604,7 +1616,7 @@ pub fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type table.Type) t
 						expr.pos)
 				}
 			} else {
-				c.check_or_expr(expr.or_block, ret_type)
+				c.check_or_expr(expr.or_block, ret_type, expr.return_type.clear_flag(.optional))
 			}
 			// remove optional flag
 			// return ret_type.clear_flag(.optional)
@@ -1612,16 +1624,16 @@ pub fn (mut c Checker) check_expr_opt_call(expr ast.Expr, ret_type table.Type) t
 			return ret_type
 		} else if expr.or_block.kind == .block {
 			c.error('unexpected `or` block, the function `$expr.name` does not return an optional',
-				expr.pos)
+				expr.or_block.pos)
 		} else if expr.or_block.kind == .propagate {
 			c.error('unexpected `?`, the function `$expr.name`, does not return an optional',
-				expr.pos)
+				expr.or_block.pos)
 		}
 	}
 	return ret_type
 }
 
-pub fn (mut c Checker) check_or_expr(or_expr ast.OrExpr, ret_type table.Type) {
+pub fn (mut c Checker) check_or_expr(or_expr ast.OrExpr, ret_type table.Type, expr_return_type table.Type) {
 	if or_expr.kind == .propagate {
 		if !c.cur_fn.return_type.has_flag(.optional) && c.cur_fn.name != 'main.main' {
 			c.error('to propagate the optional call, `$c.cur_fn.name` must itself return an optional',
@@ -1641,24 +1653,29 @@ pub fn (mut c Checker) check_or_expr(or_expr ast.OrExpr, ret_type table.Type) {
 	}
 	last_stmt := or_expr.stmts[stmts_len - 1]
 	if ret_type != table.void_type {
-		match mut last_stmt {
+		match last_stmt {
 			ast.ExprStmt {
-				last_stmt.typ = c.expr(last_stmt.expr)
-				type_fits := c.check_types(last_stmt.typ, ret_type)
+				last_stmt_typ := c.expr(last_stmt.expr)
+				type_fits := c.check_types(last_stmt_typ, ret_type)
 				is_panic_or_exit := is_expr_panic_or_exit(last_stmt.expr)
 				if type_fits || is_panic_or_exit {
 					return
 				}
-				type_name := c.table.type_to_str(last_stmt.typ)
 				expected_type_name := c.table.type_to_str(ret_type.clear_flag(.optional))
-				c.error('wrong return type `$type_name` in the `or {}` block, expected `$expected_type_name`',
-					last_stmt.pos)
+				if last_stmt.typ == table.void_type {
+					c.error('`or` block must provide a default value of type `$expected_type_name`, or return/exit/continue/break/panic',
+						last_stmt.pos)
+				} else {
+					type_name := c.table.type_to_str(last_stmt_typ)
+					c.error('wrong return type `$type_name` in the `or {}` block, expected `$expected_type_name`',
+						last_stmt.pos)
+				}
 				return
 			}
 			ast.BranchStmt {
-				if last_stmt.tok.kind !in [.key_continue, .key_break] {
+				if last_stmt.kind !in [.key_continue, .key_break] {
 					c.error('only break/continue is allowed as a branch statement in the end of an `or {}` block',
-						last_stmt.tok.position())
+						last_stmt.pos)
 					return
 				}
 			}
@@ -1669,6 +1686,26 @@ pub fn (mut c Checker) check_or_expr(or_expr ast.OrExpr, ret_type table.Type) {
 					or_expr.pos)
 				return
 			}
+		}
+	} else {
+		match last_stmt {
+			ast.ExprStmt {
+				if last_stmt.typ == table.void_type {
+					return
+				}
+				if is_expr_panic_or_exit(last_stmt.expr) {
+					return
+				}
+				if c.check_types(last_stmt.typ, expr_return_type) {
+					return
+				}
+				// opt_returning_string() or { ... 123 }
+				type_name := c.table.type_to_str(last_stmt.typ)
+				expr_return_type_name := c.table.type_to_str(expr_return_type)
+				c.error('the default expression type in the `or` block should be `$expr_return_type_name`, instead you gave a value of type `$type_name`',
+					last_stmt.expr.position())
+			}
+			else {}
 		}
 	}
 }
@@ -1706,7 +1743,7 @@ pub fn (mut c Checker) selector_expr(mut selector_expr ast.SelectorExpr) table.T
 	}
 	mut unknown_field_msg := 'type `$sym.source_name` has no field or method `$field_name`'
 	if field := c.table.struct_find_field(sym, field_name) {
-		if sym.mod != c.mod && !field.is_pub {
+		if sym.mod != c.mod && !field.is_pub && sym.language != .c {
 			c.error('field `${sym.source_name}.$field_name` is not public', selector_expr.pos)
 		}
 		selector_expr.typ = field.typ
@@ -2293,7 +2330,7 @@ fn (mut c Checker) stmt(node ast.Stmt) {
 		}
 		ast.BranchStmt {
 			if c.in_for_count == 0 {
-				c.error('$node.tok.lit statement not within a loop', node.tok.position())
+				c.error('$node.kind.str() statement not within a loop', node.pos)
 			}
 		}
 		ast.CompFor {
@@ -2678,77 +2715,7 @@ pub fn (mut c Checker) expr(node ast.Expr) table.Type {
 			return table.bool_type
 		}
 		ast.CastExpr {
-			node.expr_type = c.expr(node.expr)
-			from_type_sym := c.table.get_type_symbol(node.expr_type)
-			to_type_sym := c.table.get_type_symbol(node.typ)
-			expr_is_ptr := node.expr_type.is_ptr() || node.expr_type.idx() in table.pointer_type_idxs
-			if expr_is_ptr && to_type_sym.kind == .string && !node.in_prexpr {
-				if node.has_arg {
-					c.warn('to convert a C string buffer pointer to a V string, please use x.vstring_with_len(len) instead of string(x,len)',
-						node.pos)
-				} else {
-					c.warn('to convert a C string buffer pointer to a V string, please use x.vstring() instead of string(x)',
-						node.pos)
-				}
-			}
-			if node.expr_type == table.byte_type && to_type_sym.kind == .string {
-				c.error('can not cast type `byte` to string, use `${node.expr.str()}.str()` instead.',
-					node.pos)
-			}
-			if to_type_sym.kind == .sum_type {
-				if node.expr_type in [table.any_int_type, table.any_flt_type] {
-					node.expr_type = c.promote_num(node.expr_type, if node.expr_type == table.any_int_type { table.int_type } else { table.f64_type })
-				}
-				if !c.table.sumtype_has_variant(node.typ, node.expr_type) {
-					c.error('cannot cast `$from_type_sym.source_name` to `$to_type_sym.source_name`',
-						node.pos)
-				}
-			} else if node.typ == table.string_type &&
-				(from_type_sym.kind in [.any_int, .int, .byte, .byteptr] ||
-				(from_type_sym.kind == .array && from_type_sym.name == 'array_byte')) {
-				type_name := c.table.type_to_str(node.expr_type)
-				c.error('cannot cast type `$type_name` to string, use `x.str()` instead',
-					node.pos)
-			} else if node.expr_type == table.string_type {
-				if to_type_sym.kind != .alias {
-					mut error_msg := 'cannot cast a string'
-					if node.expr is ast.StringLiteral {
-						str_lit := node.expr as ast.StringLiteral
-						if str_lit.val.len == 1 {
-							error_msg += ", for denoting characters use `$str_lit.val` instead of '$str_lit.val'"
-						}
-					}
-					c.error(error_msg, node.pos)
-				}
-			} else if to_type_sym.kind == .byte &&
-				node.expr_type != table.voidptr_type && from_type_sym.kind != .enum_ && !node.expr_type.is_int() &&
-				!node.expr_type.is_float() && !node.expr_type.is_ptr() {
-				type_name := c.table.type_to_str(node.expr_type)
-				c.error('cannot cast type `$type_name` to `byte`', node.pos)
-			} else if to_type_sym.kind == .struct_ && !node.typ.is_ptr() && !(to_type_sym.info as table.Struct).is_typedef {
-				// For now we ignore C typedef because of `C.Window(C.None)` in vlib/clipboard
-				if from_type_sym.kind == .struct_ && !node.expr_type.is_ptr() {
-					from_type_info := from_type_sym.info as table.Struct
-					to_type_info := to_type_sym.info as table.Struct
-					if !c.check_struct_signature(from_type_info, to_type_info) {
-						c.error('cannot convert struct `$from_type_sym.source_name` to struct `$to_type_sym.source_name`',
-							node.pos)
-					}
-				} else {
-					type_name := c.table.type_to_str(node.expr_type)
-					c.error('cannot cast `$type_name` to struct', node.pos)
-				}
-			} else if node.typ == table.bool_type {
-				c.error('cannot cast to bool - use e.g. `some_int != 0` instead', node.pos)
-			} else if node.expr_type == table.none_type {
-				type_name := c.table.type_to_str(node.typ)
-				c.error('cannot cast `none` to `$type_name`', node.pos)
-			}
-			if node.has_arg {
-				c.expr(node.arg)
-			}
-			node.typname = c.table.get_type_symbol(node.typ).name
-			return node.typ
+			return c.cast_expr(mut node)
 		}
 		ast.CallExpr {
 			return c.call_expr(mut node)
@@ -2764,6 +2731,9 @@ pub fn (mut c Checker) expr(node ast.Expr) table.Type {
 		}
 		ast.Comment {
 			return table.void_type
+		}
+		ast.AtExpr {
+			return c.at_expr(mut node)
 		}
 		ast.ComptimeCall {
 			node.sym = c.table.get_type_symbol(c.unwrap_generic(c.expr(node.left)))
@@ -2804,6 +2774,9 @@ pub fn (mut c Checker) expr(node ast.Expr) table.Type {
 		}
 		ast.IfGuardExpr {
 			node.expr_type = c.expr(node.expr)
+			if !node.expr_type.has_flag(.optional) {
+				c.error('expression should return an option', node.expr.position())
+			}
 			return table.bool_type
 		}
 		ast.IndexExpr {
@@ -2949,6 +2922,143 @@ pub fn (mut c Checker) expr(node ast.Expr) table.Type {
 		}
 	}
 	return table.void_type
+}
+
+pub fn (mut c Checker) cast_expr(mut node ast.CastExpr) table.Type {
+	node.expr_type = c.expr(node.expr)
+	from_type_sym := c.table.get_type_symbol(node.expr_type)
+	to_type_sym := c.table.get_type_symbol(node.typ)
+	expr_is_ptr := node.expr_type.is_ptr() || node.expr_type.idx() in table.pointer_type_idxs
+	if expr_is_ptr && to_type_sym.kind == .string && !node.in_prexpr {
+		if node.has_arg {
+			c.warn('to convert a C string buffer pointer to a V string, please use x.vstring_with_len(len) instead of string(x,len)',
+				node.pos)
+		} else {
+			c.warn('to convert a C string buffer pointer to a V string, please use x.vstring() instead of string(x)',
+				node.pos)
+		}
+	}
+	if node.expr_type == table.byte_type && to_type_sym.kind == .string {
+		c.error('can not cast type `byte` to string, use `${node.expr.str()}.str()` instead.',
+			node.pos)
+	}
+	if to_type_sym.kind == .sum_type {
+		if node.expr_type in [table.any_int_type, table.any_flt_type] {
+			node.expr_type = c.promote_num(node.expr_type, if node.expr_type == table.any_int_type { table.int_type } else { table.f64_type })
+		}
+		if !c.table.sumtype_has_variant(node.typ, node.expr_type) {
+			c.error('cannot cast `$from_type_sym.source_name` to `$to_type_sym.source_name`',
+				node.pos)
+		}
+	} else if to_type_sym.info is table.Alias as alias_info {
+		if !c.check_types(node.expr_type, alias_info.parent_type) {
+			parent_type_sym := c.table.get_type_symbol(alias_info.parent_type)
+			c.error('cannot convert type `$from_type_sym.source_name` to `$to_type_sym.source_name` (alias to `$parent_type_sym.source_name`)',
+				node.pos)
+		}
+	} else if node.typ == table.string_type &&
+		(from_type_sym.kind in [.any_int, .int, .byte, .byteptr] ||
+		(from_type_sym.kind == .array && from_type_sym.name == 'array_byte')) {
+		type_name := c.table.type_to_str(node.expr_type)
+		c.error('cannot cast type `$type_name` to string, use `x.str()` instead', node.pos)
+	} else if node.expr_type == table.string_type {
+		if to_type_sym.kind != .alias {
+			mut error_msg := 'cannot cast a string'
+			if node.expr is ast.StringLiteral {
+				str_lit := node.expr as ast.StringLiteral
+				if str_lit.val.len == 1 {
+					error_msg += ", for denoting characters use `$str_lit.val` instead of '$str_lit.val'"
+				}
+			}
+			c.error(error_msg, node.pos)
+		}
+	} else if to_type_sym.kind == .byte &&
+		node.expr_type != table.voidptr_type && from_type_sym.kind != .enum_ && !node.expr_type.is_int() &&
+		!node.expr_type.is_float() && !node.expr_type.is_ptr() {
+		type_name := c.table.type_to_str(node.expr_type)
+		c.error('cannot cast type `$type_name` to `byte`', node.pos)
+	} else if to_type_sym.kind == .struct_ && !node.typ.is_ptr() && !(to_type_sym.info as table.Struct).is_typedef {
+		// For now we ignore C typedef because of `C.Window(C.None)` in vlib/clipboard
+		if from_type_sym.kind == .struct_ && !node.expr_type.is_ptr() {
+			from_type_info := from_type_sym.info as table.Struct
+			to_type_info := to_type_sym.info as table.Struct
+			if !c.check_struct_signature(from_type_info, to_type_info) {
+				c.error('cannot convert struct `$from_type_sym.source_name` to struct `$to_type_sym.source_name`',
+					node.pos)
+			}
+		} else {
+			type_name := c.table.type_to_str(node.expr_type)
+			c.error('cannot cast `$type_name` to struct', node.pos)
+		}
+	} else if node.typ == table.bool_type {
+		c.error('cannot cast to bool - use e.g. `some_int != 0` instead', node.pos)
+	} else if node.expr_type == table.none_type {
+		type_name := c.table.type_to_str(node.typ)
+		c.error('cannot cast `none` to `$type_name`', node.pos)
+	}
+	if node.has_arg {
+		c.expr(node.arg)
+	}
+	node.typname = c.table.get_type_symbol(node.typ).name
+	return node.typ
+}
+
+fn (mut c Checker) at_expr(mut node ast.AtExpr) table.Type {
+	match node.kind {
+		.fn_name {
+			node.val = c.cur_fn.name.all_after_last('.')
+		}
+		.mod_name {
+			node.val = c.cur_fn.mod
+		}
+		.struct_name {
+			if c.cur_fn.is_method {
+				node.val = c.table.type_to_str(c.cur_fn.receiver.typ).all_after_last('.')
+			} else {
+				node.val = ''
+			}
+		}
+		.vexe_path {
+			node.val = pref.vexe_path()
+		}
+		.file_path {
+			node.val = os.real_path(c.file.path)
+		}
+		.line_nr {
+			node.val = (node.pos.line_nr + 1).str()
+		}
+		.column_nr {
+			_, column := util.filepath_pos_to_source_and_column(c.file.path, node.pos)
+			node.val = (column + 1).str()
+		}
+		.vhash {
+			node.val = util.vhash()
+		}
+		.vmod_file {
+			if c.vmod_file_content.len == 0 {
+				mut mcache := vmod.get_cache()
+				vmod_file_location := mcache.get_by_file(c.file.path)
+				if vmod_file_location.vmod_file.len == 0 {
+					c.error('@VMOD_FILE can be used only in projects, that have v.mod file',
+						node.pos)
+				}
+				vmod_content := os.read_file(vmod_file_location.vmod_file) or {
+					''
+				}
+				$if windows {
+					c.vmod_file_content = vmod_content.replace('\r\n', '\n')
+				} $else {
+					c.vmod_file_content = vmod_content
+				}
+			}
+			node.val = c.vmod_file_content
+		}
+		.unknown {
+			c.error('unknown @ identifier: ${node.name}. Available identifiers: $token.valid_at_tokens',
+				node.pos)
+		}
+	}
+	return table.string_type
 }
 
 pub fn (mut c Checker) ident(mut ident ast.Ident) table.Type {

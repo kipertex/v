@@ -6,6 +6,10 @@ import v.ast
 import v.table
 import strings
 
+const (
+	invalid_escapes = ['(', '{', '$', '`', '.']
+)
+
 fn smart_quote(str string, raw bool) string {
 	len := str.len
 	if len == 0 {
@@ -14,6 +18,7 @@ fn smart_quote(str string, raw bool) string {
 	mut result := strings.new_builder(0)
 	mut pos := -1
 	mut last := ''
+	// TODO: This should be a single char?
 	mut next := ''
 	mut skip_next := false
 	for {
@@ -43,45 +48,43 @@ fn smart_quote(str string, raw bool) string {
 			toadd = '\\"'
 			current = ''
 		}
-		if raw && current == '\\' {
-			toadd = '\\\\'
-		}
-		// keep newlines in string
-		if current == '\n' {
-			toadd = '\\n'
-			current = ''
-		}
-		if current == '\r' && next == '\n' {
-			toadd = '\r\n'
-			current = ''
-			skip_next = true
-		}
-		// backslash
-		if !raw && current == '\\' {
-			// escaped backslash - keep as is
-			if next == '\\' {
+		if current == '\\' {
+			if raw {
 				toadd = '\\\\'
-				skip_next = true
-			}
-			// keep raw escape squence
-			else {
-				if next != '' {
+			} else {
+				// escaped backslash - keep as is
+				if next == '\\' {
+					toadd = '\\\\'
+					skip_next = true
+				} else if next != '' {
 					if raw {
 						toadd = '\\\\' + next
 						skip_next = true
 					}
-					// escape it
-					else {
+					// keep all valid escape sequences
+					else if next !in invalid_escapes {
 						toadd = '\\' + next
+						skip_next = true
+					} else {
+						toadd = next
 						skip_next = true
 					}
 				}
 			}
 		}
+		// keep newlines in string
+		if current == '\n' {
+			toadd = '\\n'
+			current = ''
+		} else if current == '\r' && next == '\n' {
+			toadd = '\r\n'
+			current = ''
+			skip_next = true
+		}
 		// Dolar sign
 		if !raw && current == '$' {
 			if last == '\\' {
-				toadd = '\\$'
+				toadd = r'\$'
 			}
 		}
 		// Windows style new line \r\n
@@ -266,15 +269,8 @@ fn (mut g Gen) string_inter_literal_sb_optimized(call_expr ast.CallExpr) {
 		g.expr(call_expr.left)
 		g.write(', ')
 		typ := node.expr_types[i]
-		sym := g.table.get_type_symbol(typ)
-		// if typ.is_number() {
-		if sym.kind == .alias && (sym.info as table.Alias).parent_type.is_number() {
-			// Handle number aliases TODO this must be more generic, handled by g.typ()?
-			g.write('int_str(')
-		} else {
-			g.write(g.typ(typ))
-			g.write('_str(')
-		}
+		g.write(g.typ(typ))
+		g.write('_str(')
 		g.expr(node.exprs[i])
 		g.writeln('));')
 	}
@@ -336,30 +332,31 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 		if node.precisions[i] != 987698 {
 			fmt = '${fmt}.${node.precisions[i]}'
 		}
+		typ := g.unwrap_generic(node.expr_types[i])
 		if fspec == `s` {
 			if node.fwidths[i] == 0 {
 				g.write('.*s')
 			} else {
 				g.write('*.*s')
 			}
-		} else if node.expr_types[i].is_float() {
+		} else if typ.is_float() {
 			g.write('$fmt${fspec:c}')
-		} else if node.expr_types[i].is_pointer() {
+		} else if typ.is_pointer() {
 			if fspec == `p` {
 				g.write('${fmt}p')
 			} else {
 				g.write('$fmt"PRI${fspec:c}PTR"')
 			}
-		} else if node.expr_types[i].is_int() {
+		} else if typ.is_int() {
 			if fspec == `c` {
 				g.write('${fmt}c')
 			} else {
 				g.write('$fmt"PRI${fspec:c}')
-				if node.expr_types[i] in [table.i8_type, table.byte_type] {
+				if typ in [table.i8_type, table.byte_type] {
 					g.write('8')
-				} else if node.expr_types[i] in [table.i16_type, table.u16_type] {
+				} else if typ in [table.i16_type, table.u16_type] {
 					g.write('16')
-				} else if node.expr_types[i] in [table.i64_type, table.u64_type] {
+				} else if typ in [table.i64_type, table.u64_type] {
 					g.write('64')
 				} else {
 					g.write('32')
@@ -378,7 +375,8 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 	g.write('", $num_string_parts, ')
 	// Build args
 	for i, expr in node.exprs {
-		if node.expr_types[i] == table.string_type {
+		typ := g.unwrap_generic(node.expr_types[i])
+		if typ == table.string_type {
 			if g.inside_vweb_tmpl {
 				g.write('vweb__filter(')
 				g.expr(expr)
@@ -386,18 +384,17 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 			} else {
 				g.expr(expr)
 			}
-		} else if node.expr_types[i] == table.bool_type {
+		} else if typ == table.bool_type {
 			g.expr(expr)
 			g.write(' ? _SLIT("true") : _SLIT("false")')
-		} else if node.expr_types[i].is_number() || node.expr_types[i].is_pointer() ||
-			node.fmts[i] == `d` {
-			if node.expr_types[i].is_signed() && node.fmts[i] in [`x`, `X`, `o`] {
+		} else if typ.is_number() || typ.is_pointer() || node.fmts[i] == `d` {
+			if typ.is_signed() && node.fmts[i] in [`x`, `X`, `o`] {
 				// convert to unsigned first befors C's integer propagation strikes
-				if node.expr_types[i] == table.i8_type {
+				if typ == table.i8_type {
 					g.write('(byte)(')
-				} else if node.expr_types[i] == table.i16_type {
+				} else if typ == table.i16_type {
 					g.write('(u16)(')
-				} else if node.expr_types[i] == table.int_type {
+				} else if typ == table.int_type {
 					g.write('(u32)(')
 				} else {
 					g.write('(u64)(')
@@ -408,7 +405,7 @@ fn (mut g Gen) string_inter_literal(node ast.StringInterLiteral) {
 				g.expr(expr)
 			}
 		} else if node.fmts[i] == `s` {
-			g.gen_expr_to_string(expr, node.expr_types[i])
+			g.gen_expr_to_string(expr, typ)
 		} else {
 			g.expr(expr)
 		}
