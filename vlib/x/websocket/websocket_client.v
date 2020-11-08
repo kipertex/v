@@ -109,6 +109,7 @@ pub fn (mut ws Client) listen() ? {
 	ws.logger.info('Starting client listener, server($ws.is_server)...')
 	defer {
 		ws.logger.info('Quit client listener, server($ws.is_server)...')
+		ws.close(1000, 'closed by client')
 	}
 	for ws.state == .open {
 		msg := ws.read_next_message() or {
@@ -447,12 +448,15 @@ fn (mut ws Client) send_control_frame(code OPCode, frame_typ string, payload []b
 fn parse_uri(url string) ?&Uri {
 	u := urllib.parse(url)?
 	v := u.request_uri().split('?')
-	port := if u.str().starts_with('ws://') {
-		'80'
-	} else if u.str().starts_with('wss://') {
-		'443'
-	} else {
-		u.port()
+	mut port := u.port()
+	if port == '' {
+		port = if u.str().starts_with('ws://') {
+				'80'
+			} else if u.str().starts_with('wss://') {
+				'443'
+			} else {
+				u.port()
+			}
 	}
 	querystring := if v.len > 1 { '?' + v[1] } else { '' }
 	return &Uri{

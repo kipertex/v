@@ -142,7 +142,17 @@ fn vpm_search(keywords []string) {
 		}
 	}
 	if index == 0 {
-		println('No module(s) found for "$joined"')
+		vexe := os.getenv('VEXE')
+		vroot := os.real_path(os.dir(vexe))
+		mut messages := ['No module(s) found for `$joined` .']
+		for vlibmod in search_keys {
+			if os.is_dir(os.join_path(vroot, 'vlib', vlibmod)) {
+				messages << 'There is already an existing "$vlibmod" module in vlib, so you can just `import $vlibmod` .'
+			}
+		}
+		for m in messages {
+			println(m)
+		}
 	} else {
 		println('\nUse "v install author_name.module_name" to install the module.')
 	}
@@ -542,7 +552,7 @@ fn init_settings() {
 	s.is_help = '-h' in os.args || '--help' in os.args || 'help' in os.args
 	s.is_verbose = '-v' in os.args
 	s.server_urls = cmdline.options(os.args, '-server-url')
-	s.vmodules_path = os.join_path(os.home_dir(), '.vmodules')
+	s.vmodules_path = os.vmodules_dir()
 }
 
 fn verbose_println(s string) {

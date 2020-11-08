@@ -31,7 +31,7 @@ pub struct Checker {
 	pref              &pref.Preferences // Preferences shared from V struct
 pub mut:
 	table             &table.Table
-	file              ast.File
+	file              &ast.File = 0
 	nr_errors         int
 	nr_warnings       int
 	errors            []errors.Error
@@ -61,6 +61,7 @@ mut:
 	error_details     []string
 	generic_funcs     []&ast.FnDecl
 	vmod_file_content string // needed for @VMOD_FILE, contents of the file, *NOT its path*
+	vweb_gen_types    []table.Type // vweb route checks
 }
 
 pub fn new_checker(table &table.Table, pref &pref.Preferences) Checker {
@@ -71,7 +72,7 @@ pub fn new_checker(table &table.Table, pref &pref.Preferences) Checker {
 	}
 }
 
-pub fn (mut c Checker) check(ast_file ast.File) {
+pub fn (mut c Checker) check(ast_file &ast.File) {
 	c.file = ast_file
 	for i, ast_import in ast_file.imports {
 		for j in 0 .. i {
@@ -112,7 +113,7 @@ pub fn (mut c Checker) check_scope_vars(sc &ast.Scope) {
 }
 
 // not used right now
-pub fn (mut c Checker) check2(ast_file ast.File) []errors.Error {
+pub fn (mut c Checker) check2(ast_file &ast.File) []errors.Error {
 	c.file = ast_file
 	for stmt in ast_file.stmts {
 		c.stmt(stmt)
@@ -147,6 +148,7 @@ pub fn (mut c Checker) check_files(ast_files []ast.File) {
 			has_main_fn = true
 		}
 	}
+	c.verify_all_vweb_routes()
 	// Make sure fn main is defined in non lib builds
 	if c.pref.build_mode == .build_module || c.pref.is_test {
 		return
@@ -1565,7 +1567,13 @@ pub fn (mut c Checker) call_fn(mut call_expr ast.CallExpr) table.Type {
 		// Handle `foo<T>() T` => `foo<int>() int` => return int
 		return_sym := c.table.get_type_symbol(f.return_type)
 		if return_sym.source_name == 'T' {
-			return call_expr.generic_type
+			mut typ := call_expr.generic_type
+			typ = typ.set_nr_muls(f.return_type.nr_muls())
+			if f.return_type.has_flag(.optional) {
+				typ = typ.set_flag(.optional)
+			}
+			call_expr.return_type = typ
+			return typ
 		} else if return_sym.kind == .array {
 			elem_info := return_sym.info as table.Array
 			elem_sym := c.table.get_type_symbol(elem_info.elem_type)
@@ -2074,8 +2082,9 @@ pub fn (mut c Checker) assign_stmt(mut assign_stmt ast.AssignStmt) {
 		right_type_unwrapped := c.unwrap_generic(right_type)
 		left_sym := c.table.get_type_symbol(left_type_unwrapped)
 		right_sym := c.table.get_type_symbol(right_type_unwrapped)
-		if (left_type.is_ptr() || left_sym.is_pointer()) &&
-			assign_stmt.op !in [.assign, .decl_assign] && !c.inside_unsafe {
+		left_is_ptr := left_type.is_ptr() || left_sym.is_pointer()
+		right_is_ptr := right_type.is_ptr() || right_sym.is_pointer()
+		if left_is_ptr && assign_stmt.op !in [.assign, .decl_assign] && !c.inside_unsafe {
 			// ptr op=
 			c.warn('pointer arithmetic is only allowed in `unsafe` blocks', assign_stmt.pos)
 		}
@@ -2083,6 +2092,15 @@ pub fn (mut c Checker) assign_stmt(mut assign_stmt ast.AssignStmt) {
 			// TODO fix this in C2V instead, for example cast enums to int before using `|` on them.
 			// TODO replace all c.pref.translated checks with `$if !translated` for performance
 			continue
+		}
+		if left_is_ptr && (right is ast.StructInit || !right_is_ptr) && !right_sym.is_number() {
+			left_name := c.table.type_to_str(left_type_unwrapped)
+			mut rtype := right_type_unwrapped
+			if rtype.is_ptr() {
+				rtype = rtype.deref()
+			}
+			right_name := c.table.type_to_str(rtype)
+			c.error('mismatched types `$left_name` and `$right_name`', assign_stmt.pos)
 		}
 		// Single side check
 		match assign_stmt.op {
@@ -3835,10 +3853,15 @@ fn (mut c Checker) check_index_type(typ_sym &table.TypeSymbol, index_type table.
 	// println('index expr left=$typ_sym.source_name $node.pos.line_nr')
 	// if typ_sym.kind == .array && (!(table.type_idx(index_type) in table.number_type_idxs) &&
 	// index_type_sym.kind != .enum_) {
-	if typ_sym.kind in [.array, .array_fixed] && !(index_type.is_number() || index_type_sym.kind ==
-		.enum_) {
-		c.error('non-integer index `$index_type_sym.source_name` (array type `$typ_sym.source_name`)',
-			pos)
+	if typ_sym.kind in [.array, .array_fixed, .string, .ustring] {
+		if !(index_type.is_number() || index_type_sym.kind == .enum_) {
+			type_str := if typ_sym.kind in [.string, .ustring] { 'non-integer string index `$index_type_sym.source_name`' } else { 'non-integer index `$index_type_sym.source_name` (array type `$typ_sym.source_name`)' }
+			c.error('$type_str', pos)
+		}
+		if index_type.has_flag(.optional) {
+			type_str := if typ_sym.kind in [.string, .ustring] { '(type `$typ_sym.source_name`)' } else { '(array type `$typ_sym.source_name`)' }
+			c.error('cannot use optional as index $type_str', pos)
+		}
 	}
 }
 
@@ -4186,17 +4209,17 @@ fn (mut c Checker) post_process_generic_fns() {
 	// Loop thru each generic function concrete type.
 	// Check each specific fn instantiation.
 	for i in 0 .. c.generic_funcs.len {
-		mut node := c.generic_funcs[i]
 		if c.table.fn_gen_types.len == 0 {
 			// no concrete types, so just skip:
 			continue
 		}
-		// eprintln('>> post_process_generic_fns $c.file.path | $node.name , c.table.fn_gen_types.len: $c.table.fn_gen_types.len')
+		mut node := c.generic_funcs[i]
 		for gen_type in c.table.fn_gen_types[node.name] {
 			c.cur_generic_type = gen_type
-			// sym:=c.table.get_type_symbol(gen_type)
-			// println('\ncalling check for $node.name for type $sym.source_name')
 			c.fn_decl(mut node)
+			if node.name in ['vweb.run_app', 'vweb.run'] {
+				c.vweb_gen_types << gen_type
+			}
 		}
 		c.cur_generic_type = 0
 		c.generic_funcs[i] = 0
@@ -4245,6 +4268,8 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 			c.error('cannot define new methods on non-local `$sym.source_name` (' +
 				'current module is `$c.mod`, `$sym.source_name` is from `$sym.mod`)', node.pos)
 		}
+		// needed for proper error reporting during vweb route checking
+		sym.methods[node.method_idx].source_fn = voidptr(node)
 	}
 	if node.language == .v {
 		// Make sure all types are valid
@@ -4301,6 +4326,7 @@ fn (mut c Checker) fn_decl(mut node ast.FnDecl) {
 		c.error('missing return at end of function `$node.name`', node.pos)
 	}
 	c.returns = false
+	node.source_file = c.file
 }
 
 fn has_top_return(stmts []ast.Stmt) bool {
@@ -4320,4 +4346,46 @@ fn has_top_return(stmts []ast.Stmt) bool {
 		}
 	}
 	return false
+}
+
+fn (mut c Checker) verify_vweb_params_for_method(m table.Fn) (bool, int, int) {
+	margs := m.params.len - 1 // first arg is the receiver/this
+	if m.attrs.len == 0 {
+		// allow non custom routed methods, with 1:1 mapping
+		return true, -1, margs
+	}
+	mut route_attributes := 0
+	for a in m.attrs {
+		if a.name.starts_with('/') {
+			route_attributes += a.name.count(':')
+		}
+	}
+	return route_attributes == margs, route_attributes, margs
+}
+
+fn (mut c Checker) verify_all_vweb_routes() {
+	if c.vweb_gen_types.len == 0 {
+		return
+	}
+	typ_vweb_result := c.table.find_type_idx('vweb.Result')
+	for vgt in c.vweb_gen_types {
+		sym_app := c.table.get_type_symbol(vgt)
+		for m in sym_app.methods {
+			if m.return_type_source_name == 'vweb.Result' {
+				is_ok, nroute_attributes, nargs := c.verify_vweb_params_for_method(m)
+				if !is_ok {
+					f := &ast.FnDecl(m.source_fn)
+					if isnil(f) {
+						continue
+					}
+					if f.return_type == typ_vweb_result &&
+						f.receiver.typ == m.params[0].typ && f.name == m.name {
+						c.file = f.source_file // setup of file path for the warning
+						c.warn('mismatched parameters count between vweb method `${sym_app.name}.$m.name` ($nargs) and route attribute $m.attrs ($nroute_attributes)',
+							f.pos)
+					}
+				}
+			}
+		}
+	}
 }
