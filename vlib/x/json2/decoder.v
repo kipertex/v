@@ -62,7 +62,7 @@ fn (p Parser) emit_error(msg string) string {
 	}
 	column := util.imax(0, cur.pos - pp + cur.len - 1)
 	line := cur.line_nr
-	return '[jisoni] $msg ($line:$column)'
+	return '[json] $msg ($line:$column)'
 }
 
 fn new_parser(srce string, convert_type bool) Parser {
@@ -223,8 +223,6 @@ fn (mut p Parser) decode_value() ?Any {
 fn (mut p Parser) decode_string() ?Any {
 	mut strwr := strings.new_builder(200)
 	for i := 0; i < p.tok.lit.len; i++ {
-		// s := p.tok.lit[i].str()
-		// println('$i $s')
 		if ((i-1 >= 0 && p.tok.lit[i-1] != `/`) || i == 0) && int(p.tok.lit[i]) in [9, 10, 0] {
 			return error('character must be escaped with a backslash.')
 		}
@@ -235,8 +233,33 @@ fn (mut p Parser) decode_string() ?Any {
 
 		if i+1 < p.tok.lit.len && p.tok.lit[i] == 92 {
 			peek := p.tok.lit[i+1]
-			if peek in [`b`, `f`, `n`, `r`, `t`, `u`, `\\`, `"`, `/`] {
-				if peek == `u` {
+			match peek{
+				`b` {
+					i++
+					strwr.write_b(`\b`)
+					continue
+				}
+				`f` {
+					i++
+					strwr.write_b(`\f`)
+					continue
+				}
+				`n` {
+					i++
+					strwr.write_b(`\n`)
+					continue
+				}
+				`r` {
+					i++
+					strwr.write_b(`\r`)
+					continue
+				}
+				`t` {
+					i++
+					strwr.write_b(`\t`)
+					continue
+				}
+				`u` {
 					if i+5 < p.tok.lit.len {
 						codepoint := p.tok.lit[i+2..i+6]
 						check_valid_hex(codepoint)?
@@ -248,13 +271,23 @@ fn (mut p Parser) decode_string() ?Any {
 						return error('incomplete unicode escape.')
 					}
 				}
-
-				i++
-				strwr.write_b(p.tok.lit[i])
-				continue
-			} else {
-				return error('invalid backslash escape.')
-			}
+				`\\` {
+					i++
+					strwr.write_b(`\\`)
+					continue
+				}
+				`"` {
+					i++
+					strwr.write_b(`\"`)
+					continue
+				}
+				`/` {
+					i++
+					strwr.write_b(`/`)
+					continue
+				}
+				else { return error('invalid backslash escape.') }
+			} 
 
 			if int(peek) == 85 {
 				return error('unicode endpoints must be in lowercase `u`.')
@@ -291,7 +324,7 @@ fn (mut p Parser) decode_number() ?Any {
 	}
 
 	if tl.starts_with('.') {
-		return error('lecimals must start with a digit followed by a dot.')
+		return error('decimals must start with a digit followed by a dot.')
 	}
 
 	if tl.ends_with('+') || tl.ends_with('-') {
@@ -318,7 +351,7 @@ fn (mut p Parser) decode_number() ?Any {
 		return if is_fl {
 			Any(tl.f64())
 		} else {
-			Any(tl.int())
+			Any(tl.i64())
 		}
 	}
 

@@ -63,7 +63,6 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 		// foo<T>() => foo_int(), foo_string() etc
 		gen_name := g.typ(g.cur_generic_type)
 		name += '_' + gen_name
-		type_name = type_name.replace('T', gen_name)
 	}
 	// if g.pref.show_cc && it.is_builtin {
 	// println(name)
@@ -153,11 +152,6 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 	if it.return_type == table.void_type {
 		g.write_defer_stmts_when_needed()
 	}
-	//
-	if g.autofree && !g.pref.experimental {
-		// TODO: remove this, when g.write_autofree_stmts_when_needed works properly
-		g.autofree_scope_vars(it.body_pos.pos)
-	}
 	if it.return_type != table.void_type && it.stmts.len > 0 && it.stmts.last() !is ast.Return {
 		default_expr := g.type_default(it.return_type)
 		// TODO: perf?
@@ -186,6 +180,7 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 	}
 }
 
+/*
 fn (mut g Gen) write_autofree_stmts_when_needed(r ast.Return) {
 	// TODO: write_autofree_stmts_when_needed should account for the current local scope vars.
 	// TODO: write_autofree_stmts_when_needed should not free the returned variables.
@@ -195,7 +190,7 @@ fn (mut g Gen) write_autofree_stmts_when_needed(r ast.Return) {
 	// g.writeln(g.autofree_scope_vars(g.fn_decl.body_pos.pos))
 	// g.writeln('//--------------------------------------------------- ') // //g.write( g.autofree_scope_vars(r.pos.pos) )
 }
-
+*/
 fn (mut g Gen) write_defer_stmts_when_needed() {
 	if g.defer_stmts.len > 0 {
 		g.write_defer_stmts()
@@ -217,14 +212,6 @@ fn (mut g Gen) fn_args(args []table.Param, is_variadic bool) ([]string, []string
 		typ := g.unwrap_generic(arg.typ)
 		arg_type_sym := g.table.get_type_symbol(typ)
 		mut arg_type_name := g.typ(typ) // util.no_dots(arg_type_sym.name)
-		// if arg.name == 'xxx' {
-		// println('xxx arg type= ' + arg_type_name)
-		// }
-		if g.cur_generic_type != 0 {
-			// foo<T>() => foo_int(), foo_string() etc
-			gen_name := g.typ(g.cur_generic_type)
-			arg_type_name = arg_type_name.replace('T', gen_name)
-		}
 		is_varg := i == args.len - 1 && is_variadic
 		if is_varg {
 			varg_type_str := int(arg.typ).str()
@@ -378,6 +365,12 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			}
 			else {}
 		}
+	}
+	if left_sym.kind == .sum_type && node.name == 'type_name' {
+		g.write('tos3( /* $left_sym.name */ v_typeof_sumtype_${node.receiver_type}( (')
+		g.expr(node.left)
+		g.write(').typ ))')
+		return
 	}
 	if node.name == 'str' {
 		mut styp := g.typ(node.receiver_type)
@@ -740,7 +733,7 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 	if g.inside_vweb_tmpl {
 		return
 	}
-	g.doing_autofree_tmp = true
+	// g.doing_autofree_tmp = true
 	// g.write('/* postgen */')
 	scope := g.file.scope.innermost(node_pos)
 	for _, obj in scope.objects {
@@ -771,7 +764,7 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 		}
 	}
 	// g.write('/* postgen end */')
-	g.doing_autofree_tmp = false
+	// g.doing_autofree_tmp = false
 }
 
 fn (mut g Gen) call_args(node ast.CallExpr) {

@@ -1,3 +1,5 @@
+import os
+
 // This program is built and run via Valgrind to ensure there are no leaks with -autofree
 fn simple() {
 	nums := [1, 2, 3] // local array must be freed
@@ -7,6 +9,12 @@ fn simple() {
 	name := 'Peter' // string literals mustn't be freed
 	str_inter := 'hello, $name' // concatenated strings must be freed
 	// nums.free() // this should result in a double free and a CI error
+	if true {
+		// test the freeing of local vars in a new scope
+		nums2 := [4, 5, 6]
+		str_inter2 := 'hello, $name'
+		println(nums2)
+	}
 	arr := return_array([])
 	println(arr)
 }
@@ -218,6 +226,36 @@ fn free_inside_opt_block() {
 	}
 }
 
+fn free_before_return() {
+	s := 'a' + 'b'
+	println(s)
+	if true {
+		return
+	}
+}
+
+fn free_before_return_bool() bool {
+	s := 'a' + 'b'
+	println(s)
+	return true
+}
+
+struct User {
+	name string
+	age  int
+}
+
+fn free_array_except_returned_element() {
+	user := get_user()
+	println(user)
+}
+
+fn get_user() User {
+	users := [User{'Peter', 25}, User{'Alice', 21}]
+	user := users[0] // has to be cloned, since `users` are going to be freed at the end of the function
+	return user
+}
+
 fn main() {
 	println('start')
 	simple()
@@ -227,7 +265,7 @@ fn main() {
 	str_tmp_expr_advanced_var_decl()
 	str_inter()
 	match_expr()
-	optional_str()
+	// optional_str()
 	// optional_return()
 	str_replace()
 	str_replace2()
@@ -236,8 +274,11 @@ fn main() {
 	q := if_expr()
 	s := return_if_expr()
 	free_inside_opt_block()
+	// free_before_return()
+	// free_before_return_bool()
 	// free_map()
 	// loop_map()
+	// free_array_except_returned_element()
 	println('end')
 }
 

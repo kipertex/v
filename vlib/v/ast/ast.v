@@ -7,7 +7,7 @@ import v.token
 import v.table
 import v.errors
 
-pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl
+pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl | UnionSumTypeDecl
 
 pub type Expr = AnonFn | ArrayInit | AsCast | Assoc | AtExpr | BoolLiteral | CTempVar |
 	CallExpr | CastExpr | ChanInit | CharLiteral | Comment | ComptimeCall | ConcatExpr | EnumVal |
@@ -109,6 +109,7 @@ pub:
 pub mut:
 	expr_type  table.Type // type of `Foo` in `Foo.bar`
 	typ        table.Type // type of the entire thing (`Foo.bar`)
+	name_type  table.Type // T in `T.name` or typeof in `typeof(expr).name`
 }
 
 // module declaration
@@ -169,6 +170,7 @@ pub struct StructDecl {
 pub:
 	pos          token.Position
 	name         string
+	gen_types    []table.Type
 	is_pub       bool
 	mut_pos      int // mut:
 	pub_pos      int // pub:
@@ -292,7 +294,7 @@ pub:
 	left               Expr // `user` in `user.register()`
 	mod                string
 pub mut:
-	name               string
+	name               string // left.name()
 	is_method          bool
 	is_field           bool // temp hack, remove ASAP when re-impl CallExpr / Selector (joe)
 	args               []CallArg
@@ -304,6 +306,7 @@ pub mut:
 	return_type        table.Type
 	should_be_skipped  bool
 	generic_type       table.Type // TODO array, to support multiple types
+	generic_list_pos   token.Position
 	free_receiver      bool // true if the receiver expression needs to be freed
 	// autofree_pregen    string
 	// autofree_vars      []AutofreeArgVar
@@ -324,7 +327,7 @@ pub:
 	comments        []Comment
 pub mut:
 	typ             table.Type
-	is_tmp_autofree bool
+	is_tmp_autofree bool // this tells cgen that a tmp variable has to be used for the arg expression in order to free it after the call
 	pos             token.Position
 	// tmp_name        string // for autofree
 }
@@ -361,9 +364,21 @@ pub:
 	is_arg          bool // fn args should not be autofreed
 pub mut:
 	typ             table.Type
+	sum_type_cast   table.Type
 	pos             token.Position
 	is_used         bool
 	is_changed      bool // to detect mutable vars that are never changed
+}
+
+// used for smartcasting only
+// struct fields change type in scopes
+pub struct ScopeStructField {
+pub:
+	struct_type   table.Type // type of struct
+	name          string
+	pos           token.Position
+	typ           table.Type
+	sum_type_cast table.Type
 }
 
 pub struct GlobalField {
@@ -521,7 +536,7 @@ pub:
 	mut_name     bool // `if mut name is`
 pub mut:
 	stmts        []Stmt
-	smartcast    bool // true when cond is `x is SumType`, set in checker.if_expr
+	smartcast    bool // true when cond is `x is SumType`, set in checker.if_expr // no longer needed with union sum types TODO: remove
 }
 
 pub struct UnsafeExpr {
@@ -560,6 +575,7 @@ pub mut:
 pub struct MatchBranch {
 pub:
 	exprs         []Expr // left side
+	ecmnts        [][]Comment // inline comments for each left side expr
 	stmts         []Stmt // right side
 	pos           token.Position
 	comments      []Comment // comment above `xxx {`
@@ -732,6 +748,16 @@ pub:
 	pos       token.Position
 }
 
+// New implementation of sum types
+pub struct UnionSumTypeDecl {
+pub:
+	name      string
+	is_pub    bool
+	pos       token.Position
+pub mut:
+	sub_types []table.Type
+}
+
 pub struct FnTypeDecl {
 pub:
 	name   string
@@ -781,6 +807,7 @@ pub:
 	pos             token.Position
 	elem_type_pos   token.Position
 	exprs           []Expr // `[expr, expr]` or `[expr]Type{}` for fixed array
+	ecmnts          [][]Comment // optional iembed comments after each expr
 	is_fixed        bool
 	has_val         bool // fixed size literal `[expr, expr]!!`
 	mod             string
@@ -1114,7 +1141,7 @@ pub fn (stmt Stmt) position() token.Position {
 		AssertStmt, AssignStmt, Block, BranchStmt, CompFor, ConstDecl, DeferStmt, EnumDecl, ExprStmt, FnDecl, ForCStmt, ForInStmt, ForStmt, GotoLabel, GotoStmt, Import, Return, StructDecl, GlobalDecl, HashStmt, InterfaceDecl, Module, SqlStmt { return stmt.pos }
 		GoStmt { return stmt.call_expr.position() }
 		TypeDecl { match stmt {
-				AliasTypeDecl, FnTypeDecl, SumTypeDecl { return stmt.pos }
+				AliasTypeDecl, FnTypeDecl, SumTypeDecl, UnionSumTypeDecl { return stmt.pos }
 			} }
 		// Please, do NOT use else{} here.
 		// This match is exhaustive *on purpose*, to help force
