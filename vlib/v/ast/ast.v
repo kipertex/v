@@ -9,7 +9,7 @@ import v.errors
 
 pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl | UnionSumTypeDecl
 
-pub type Expr = AnonFn | ArrayInit | AsCast | Assoc | AtExpr | BoolLiteral | CTempVar |
+pub __type Expr = AnonFn | ArrayInit | AsCast | Assoc | AtExpr | BoolLiteral | CTempVar |
 	CallExpr | CastExpr | ChanInit | CharLiteral | Comment | ComptimeCall | ConcatExpr | EnumVal |
 	FloatLiteral | Ident | IfExpr | IfGuardExpr | IndexExpr | InfixExpr | IntegerLiteral |
 	Likely | LockExpr | MapInit | MatchExpr | None | OrExpr | ParExpr | PostfixExpr | PrefixExpr |
@@ -284,8 +284,9 @@ pub mut:
 // break, continue
 pub struct BranchStmt {
 pub:
-	kind token.Kind
-	pos  token.Position
+	kind  token.Kind
+	label string
+	pos   token.Position
 }
 
 pub struct CallExpr {
@@ -533,7 +534,7 @@ pub:
 	body_pos     token.Position
 	comments     []Comment
 	left_as_name string // `name` in `if cond is SumType as name`
-	mut_name     bool // `if mut name is`
+	is_mut_name  bool // `if mut name is`
 pub mut:
 	stmts        []Stmt
 	smartcast    bool // true when cond is `x is SumType`, set in checker.if_expr // no longer needed with union sum types TODO: remove
@@ -558,18 +559,19 @@ pub mut:
 
 pub struct MatchExpr {
 pub:
-	tok_kind      token.Kind
-	cond          Expr
-	branches      []MatchBranch
-	pos           token.Position
-	is_mut        bool // `match mut ast_node {`
-	var_name      string // `match cond as var_name {`
+	tok_kind       token.Kind
+	cond           Expr
+	branches       []MatchBranch
+	pos            token.Position
+	is_mut         bool // `match mut ast_node {`
+	var_name       string // `match cond as var_name {`
+	is_union_match bool // temporary union key after match
 pub mut:
-	is_expr       bool // returns a value
-	return_type   table.Type
-	cond_type     table.Type // type of `x` in `match x {`
-	expected_type table.Type // for debugging only
-	is_sum_type   bool
+	is_expr        bool // returns a value
+	return_type    table.Type
+	cond_type      table.Type // type of `x` in `match x {`
+	expected_type  table.Type // for debugging only
+	is_sum_type    bool
 }
 
 pub struct MatchBranch {
@@ -626,6 +628,8 @@ pub:
 	stmts  []Stmt
 	is_inf bool // `for {}`
 	pos    token.Position
+pub mut:
+	label  string // `label: for {`
 }
 
 pub struct ForInStmt {
@@ -644,6 +648,7 @@ pub mut:
 	val_type   table.Type
 	cond_type  table.Type
 	kind       table.Kind // array/map/string
+	label      string // `label: for {`
 }
 
 pub struct ForCStmt {
@@ -656,6 +661,8 @@ pub:
 	has_inc  bool
 	stmts    []Stmt
 	pos      token.Position
+pub mut:
+	label    string // `label: for {`
 }
 
 // #include etc
@@ -738,6 +745,7 @@ pub:
 	is_pub      bool
 	parent_type table.Type
 	pos         token.Position
+	comments    []Comment
 }
 
 pub struct SumTypeDecl {
@@ -746,6 +754,7 @@ pub:
 	is_pub    bool
 	sub_types []table.Type
 	pos       token.Position
+	comments  []Comment
 }
 
 // New implementation of sum types
@@ -754,16 +763,18 @@ pub:
 	name      string
 	is_pub    bool
 	pos       token.Position
+	comments  []Comment
 pub mut:
 	sub_types []table.Type
 }
 
 pub struct FnTypeDecl {
 pub:
-	name   string
-	is_pub bool
-	typ    table.Type
-	pos    token.Position
+	name     string
+	is_pub   bool
+	typ      table.Type
+	pos      token.Position
+	comments []Comment
 }
 
 // TODO: handle this differently
@@ -804,15 +815,15 @@ pub:
 
 pub struct ArrayInit {
 pub:
-	pos             token.Position
-	elem_type_pos   token.Position
+	pos             token.Position // `[]` in []Type{} position
+	elem_type_pos   token.Position // `Type` in []Type{} position
 	exprs           []Expr // `[expr, expr]` or `[expr]Type{}` for fixed array
 	ecmnts          [][]Comment // optional iembed comments after each expr
 	is_fixed        bool
 	has_val         bool // fixed size literal `[expr, expr]!!`
 	mod             string
-	len_expr        Expr
-	cap_expr        Expr
+	len_expr        Expr // len: expr
+	cap_expr        Expr // cap: expr
 	default_expr    Expr // init: expr
 	has_len         bool
 	has_cap         bool
@@ -821,8 +832,8 @@ pub mut:
 	is_interface    bool // array of interfaces e.g. `[]Animal` `[Dog{}, Cat{}]`
 	interface_types []table.Type // [Dog, Cat]
 	interface_type  table.Type // Animal
-	elem_type       table.Type
-	typ             table.Type
+	elem_type       table.Type // element type
+	typ             table.Type // array type
 }
 
 pub struct ChanInit {
@@ -1047,7 +1058,7 @@ pub mut:
 
 [inline]
 pub fn (expr Expr) is_blank_ident() bool {
-	match expr {
+	match union expr {
 		Ident { return expr.kind == .blank_ident }
 		else { return false }
 	}
@@ -1055,7 +1066,7 @@ pub fn (expr Expr) is_blank_ident() bool {
 
 pub fn (expr Expr) position() token.Position {
 	// all uncommented have to be implemented
-	match expr {
+	match union expr {
 		// KEKW2
 		AnonFn {
 			return expr.decl.pos
@@ -1091,7 +1102,7 @@ pub fn (expr Expr) position() token.Position {
 }
 
 pub fn (expr Expr) is_lvalue() bool {
-	match expr {
+	match union expr {
 		Ident { return true }
 		CTempVar { return true }
 		IndexExpr { return expr.left.is_lvalue() }
@@ -1102,7 +1113,7 @@ pub fn (expr Expr) is_lvalue() bool {
 }
 
 pub fn (expr Expr) is_expr() bool {
-	match expr {
+	match union expr {
 		IfExpr { return expr.is_expr }
 		MatchExpr { return expr.is_expr }
 		else {}

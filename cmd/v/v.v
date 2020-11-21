@@ -10,14 +10,27 @@ import v.util
 import v.builder
 
 const (
-	simple_cmd = [
-		'fmt', 'up', 'vet',
-		'self', 'tracev', 'symlink', 'bin2v',
-		'test', 'test-fmt', 'test-compiler', 'test-fixed', 'test-cleancode',
+	simple_cmd                          = [
+		'fmt',
+		'up',
+		'vet',
+		'self',
+		'tracev',
+		'symlink',
+		'bin2v',
+		'test',
+		'test-fmt',
+		'test-compiler',
+		'test-fixed',
+		'test-cleancode',
 		'repl',
-		'build-tools', 'build-examples',
+		'complete',
+		'build-tools',
+		'build-examples',
 		'build-vbinaries',
-		'setup-freetype', 'doc', 'doctor'
+		'setup-freetype',
+		'doc',
+		'doctor',
 	]
 	list_of_flags_that_allow_duplicates = ['cc', 'd', 'define', 'cf', 'cflags']
 )
@@ -27,8 +40,14 @@ fn main() {
 	// args = 123
 	if args.len == 0 || args[0] in ['-', 'repl'] {
 		// Running `./v` without args launches repl
-		if args.len == 0 && is_atty(0) != 0 {
-			println('Welcome to the V REPL (for help with V itself, type `exit`, then run `v help`).')
+		if args.len == 0 {
+			if is_atty(0) != 0 {
+				println('Welcome to the V REPL (for help with V itself, type `exit`, then run `v help`).')
+			} else {
+				mut args_and_flags := util.join_env_vflags_and_os_args()[1..].clone()
+				args_and_flags << ['run', '-']
+				pref.parse_args(args_and_flags)
+			}
 		}
 		util.launch_tool(false, 'vrepl', os.args[1..])
 		return
@@ -44,7 +63,7 @@ fn main() {
 	if command == 'test-vet' {
 		println('Please use `v test-cleancode` instead.')
 		return
-	}    
+	}
 	// Start calling the correct functions/external tools
 	// Note for future contributors: Please add new subcommands in the `match` block below.
 	if command in simple_cmd {

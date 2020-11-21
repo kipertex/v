@@ -331,16 +331,6 @@ fn test_reassign_from_function_with_parameter_selector() {
 	}
 }
 
-fn test_match_multi_branch() {
-	f := Expr3(CTempVarExpr{'ctemp'})
-	match union f {
-		CallExpr, CTempVarExpr {
-			// this check works only if f is not castet
-			assert f is CTempVarExpr
-		}
-	}
-}
-
 fn test_typeof() {
     x := Expr3(CTempVarExpr{})
 	assert typeof(x) == 'CTempVarExpr'
@@ -353,6 +343,98 @@ struct Outer2 {
 fn test_zero_value_init() {
 	// no c compiler error then it's successful
 	_ := Outer2{}
+}
+
+struct Milk {
+mut:
+	name string
+}
+
+struct Eggs {
+mut:
+	name string
+}
+
+__type Food = Milk | Eggs
+
+struct FoodWrapper {
+mut:
+	food Food
+}
+
+fn test_match_aggregate() {
+	f := Food(Milk{'test'})
+	match union f {
+		Milk, Eggs {
+			assert f.name == 'test'
+		}
+	}
+}
+
+fn test_match_mut() {
+	mut f := Food(Milk{'test'})
+	match union mut f {
+		Eggs {
+			f.name = 'eggs'
+			assert f.name == 'eggs'
+		}
+		Milk {
+			f.name = 'milk'
+			assert f.name == 'milk'
+		}
+	}
+}
+
+fn test_match_not_mut() {
+	mut f := Food(Milk{'test'})
+	match union f {
+		Eggs {
+			// only works without smartcast
+			assert f is Eggs
+		}
+		Milk {
+			// only works without smartcast
+			assert f is Milk
+		}
+	}
+}
+
+fn test_if_mut() {
+	mut f := Food(Milk{'test'})
+	if mut f is Milk {
+		f.name = 'milk'
+		assert f.name == 'milk'
+	}
+}
+
+fn test_if_not_mut() {
+	mut f := Food(Milk{'test'})
+	if f is Milk {
+		// only works without smartcast
+		assert f is Milk
+	}
+}
+
+fn test_match_mut_selector() {
+	mut f := FoodWrapper{Food(Milk{'test'})}
+	match union mut f.food {
+		Eggs {
+			f.food.name = 'eggs'
+			assert f.food.name == 'eggs'
+		}
+		Milk {
+			f.food.name = 'milk'
+			assert f.food.name == 'milk'
+		}
+	}
+}
+
+fn test_if_mut_selector() {
+	mut f := FoodWrapper{Food(Milk{'test'})}
+	if mut f.food is Milk {
+		f.food.name = 'milk'
+		assert f.food.name == 'milk'
+	}
 }
 
 fn test_sum_type_match() {

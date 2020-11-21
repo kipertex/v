@@ -51,31 +51,35 @@ pub:
 	// special case of event_fn
 	click_fn          FNMove = voidptr(0)
 	// special case of event_fn
-	wait_events       bool // set this to true for UIs, to save power
+	// wait_events       bool // set this to true for UIs, to save power
 	fullscreen        bool
 	scale             f32 = 1.0
 	// vid needs this
 	// init_text bool
 	font_path         string
+	ui_mode           bool
 }
 
 pub struct Context {
-	render_text bool
+	render_text   bool
 mut:
 	// a cache with all images created by the user. used for sokol image init and to save space
 	// (so that the user can store image ids, not entire Image objects)
-	image_cache []Image
+	image_cache   []Image
+	needs_refresh bool = true
+	ticks         int
 pub mut:
-	scale       f32 = 1.0
+	scale         f32 = 1.0
 	// will get set to 2.0 for retina, will remain 1.0 for normal
-	width       int
-	height      int
-	clear_pass  C.sg_pass_action
-	window      C.sapp_desc
-	timage_pip  C.sgl_pipeline
-	config      Config
-	ft          &FT
-	font_inited bool
+	width         int
+	height        int
+	clear_pass    C.sg_pass_action
+	window        C.sapp_desc
+	timage_pip    C.sgl_pipeline
+	config        Config
+	ft            &FT
+	font_inited   bool
+	ui_mode       bool // do not redraw everything 60 times/second, but only when the user requests
 }
 
 pub struct Size {
@@ -143,10 +147,24 @@ fn gg_init_sokol_window(user_data voidptr) {
 }
 
 fn gg_frame_fn(user_data voidptr) {
-	mut g := &Context(user_data)
-	if g.config.frame_fn != voidptr(0) {
-		g.config.frame_fn(g.config.user_data)
+	mut ctx := &Context(user_data)
+	if ctx.config.frame_fn == voidptr(0) {
+		return
 	}
+	if ctx.ui_mode && !ctx.needs_refresh {
+		// Draw 3 more frames after the "stop refresh" command
+		ctx.ticks++
+		if ctx.ticks > 3 {
+			return
+		}
+	}
+	ctx.config.frame_fn(ctx.config.user_data)
+	ctx.needs_refresh = false
+}
+
+pub fn (mut ctx Context) refresh_ui() {
+	ctx.needs_refresh = true
+	ctx.ticks = 0
 }
 
 fn gg_event_fn(ce &C.sapp_event, user_data voidptr) {
@@ -209,6 +227,7 @@ pub fn new_context(cfg Config) &Context {
 		config: cfg
 		render_text: cfg.font_path != ''
 		ft: 0
+		ui_mode: cfg.ui_mode
 	}
 	g.set_bg_color(cfg.bg_color)
 	// C.printf('new_context() %p\n', cfg.user_data)
@@ -397,10 +416,12 @@ pub fn (gg &Context) end() {
 	sgl.draw()
 	gfx.end_pass()
 	gfx.commit()
+	/*
 	if gg.config.wait_events {
 		// println('gg: waiting')
 		wait_events()
 	}
+	*/
 }
 
 fn abs(a f32) f32 {
@@ -436,11 +457,66 @@ pub fn (ctx &Context) draw_line(x f32, y f32, x2 f32, y2 f32, c gx.Color) {
 pub fn (ctx &Context) draw_rounded_rect(x f32, y f32, width f32, height f32, radius f32, color gx.Color) {
 }
 
-pub fn (ctx &Context) draw_empty_rounded_rect(x f32, y f32, width f32, height f32, radius f32, border_color gx.Color) {
+pub fn (ctx &Context) draw_empty_rounded_rect(x f32, y f32, w f32, h f32, radius f32, border_color gx.Color) {
+	mut theta := f32(0)
+	mut xx := f32(0)
+	mut yy := f32(0)
+	r := radius * f32(ctx.scale)
+	nx := x * f32(ctx.scale)
+	ny := y * f32(ctx.scale)
+	width := w * f32(ctx.scale)
+	height := h * f32(ctx.scale)
+	segments := 2 * math.pi * r
+	segdiv := segments / 4
+	rb := 0
+	lb := int(rb + segdiv)
+	lt := int(lb + segdiv)
+	rt := int(lt + segdiv)
+	sgl.c4b(border_color.r, border_color.g, border_color.b, border_color.a)
+	sgl.begin_line_strip()
+	// left top
+	lx := nx + r
+	ly := ny + r
+	for i in lt .. rt {
+		theta = 2 * f32(math.pi) * f32(i) / segments
+		xx = r * math.cosf(theta)
+		yy = r * math.sinf(theta)
+		sgl.v2f(xx + lx, yy + ly)
+	}
+	// right top
+	mut rx := nx + 2 * width - r
+	mut ry := ny + r
+	for i in rt .. int(segments) {
+		theta = 2 * f32(math.pi) * f32(i) / segments
+		xx = r * math.cosf(theta)
+		yy = r * math.sinf(theta)
+		sgl.v2f(xx + rx, yy + ry)
+	}
+	// right bottom
+	mut rbx := rx
+	mut rby := ny + 2 * height - r
+	for i in rb .. lb {
+		theta = 2 * f32(math.pi) * f32(i) / segments
+		xx = r * math.cosf(theta)
+		yy = r * math.sinf(theta)
+		sgl.v2f(xx + rbx, yy + rby)
+	}
+	// left bottom
+	mut lbx := lx
+	mut lby := ny + 2 * height - r
+	for i in lb .. lt {
+		theta = 2 * f32(math.pi) * f32(i) / segments
+		xx = r * math.cosf(theta)
+		yy = r * math.sinf(theta)
+		sgl.v2f(xx + lbx, yy + lby)
+	}
+	sgl.v2f(lx + xx, ly)
+	sgl.end()
 }
 
 fn C.WaitMessage()
 
+/*
 pub fn wait_events() {
 	unsafe {
 		$if macos {
@@ -455,3 +531,4 @@ pub fn wait_events() {
 		}
 	}
 }
+*/

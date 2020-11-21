@@ -129,21 +129,21 @@ pub fn (lit &StringInterLiteral) get_fspec_braces(i int) (string, bool) {
 	if !needs_braces {
 		mut sub_expr := lit.exprs[i]
 		for {
-			match sub_expr as sx {
+			match union mut sub_expr {
 				Ident {
-					if sx.name[0] == `@` {
+					if sub_expr.name[0] == `@` {
 						needs_braces = true
 					}
 					break
 				}
 				CallExpr {
-					if sx.args.len != 0 {
+					if sub_expr.args.len != 0 {
 						needs_braces = true
 					}
 					break
 				}
 				SelectorExpr {
-					sub_expr = sx.expr
+					sub_expr = sub_expr.expr
 					continue
 				}
 				else {
@@ -176,7 +176,7 @@ pub fn (lit &StringInterLiteral) get_fspec_braces(i int) (string, bool) {
 
 // string representation of expr
 pub fn (x Expr) str() string {
-	match x {
+	match union x {
 		CTempVar {
 			return x.orig.str()
 		}
@@ -293,6 +293,14 @@ pub fn args2str(args []CallArg) string {
 	return res.join(', ')
 }
 
+pub fn (node &BranchStmt) str() string {
+	mut s := '$node.kind'
+	if node.label.len > 0 {
+		s += ' $node.label'
+	}
+	return s
+}
+
 pub fn (node Stmt) str() string {
 	match node {
 		AssignStmt {
@@ -317,6 +325,9 @@ pub fn (node Stmt) str() string {
 				}
 			}
 			return out
+		}
+		BranchStmt {
+			return node.str()
 		}
 		ExprStmt {
 			return node.expr.str()
