@@ -7,9 +7,9 @@ import v.token
 import v.table
 import v.errors
 
-pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl | UnionSumTypeDecl
+pub type TypeDecl = AliasTypeDecl | FnTypeDecl | SumTypeDecl
 
-pub __type Expr = AnonFn | ArrayInit | AsCast | Assoc | AtExpr | BoolLiteral | CTempVar |
+pub type Expr = AnonFn | ArrayInit | AsCast | Assoc | AtExpr | BoolLiteral | CTempVar |
 	CallExpr | CastExpr | ChanInit | CharLiteral | Comment | ComptimeCall | ConcatExpr | EnumVal |
 	FloatLiteral | Ident | IfExpr | IfGuardExpr | IndexExpr | InfixExpr | IntegerLiteral |
 	Likely | LockExpr | MapInit | MatchExpr | None | OrExpr | ParExpr | PostfixExpr | PrefixExpr |
@@ -365,7 +365,7 @@ pub:
 	is_arg          bool // fn args should not be autofreed
 pub mut:
 	typ             table.Type
-	sum_type_cast   table.Type
+	sum_type_casts  []table.Type // nested sum types require nested smart casting, for that a list of types is needed
 	pos             token.Position
 	is_used         bool
 	is_changed      bool // to detect mutable vars that are never changed
@@ -375,11 +375,11 @@ pub mut:
 // struct fields change type in scopes
 pub struct ScopeStructField {
 pub:
-	struct_type   table.Type // type of struct
-	name          string
-	pos           token.Position
-	typ           table.Type
-	sum_type_cast table.Type
+	struct_type    table.Type // type of struct
+	name           string
+	pos            token.Position
+	typ            table.Type
+	sum_type_casts []table.Type // nested sum types require nested smart casting, for that a list of types is needed
 }
 
 pub struct GlobalField {
@@ -457,9 +457,9 @@ pub mut:
 }
 
 pub fn (i &Ident) var_info() IdentVar {
-	match i.info as info {
+	match mut i.info {
 		IdentVar {
-			return *info
+			return i.info
 		}
 		else {
 			// return IdentVar{}
@@ -529,15 +529,14 @@ pub mut:
 
 pub struct IfBranch {
 pub:
-	cond         Expr
-	pos          token.Position
-	body_pos     token.Position
-	comments     []Comment
-	left_as_name string // `name` in `if cond is SumType as name`
-	is_mut_name  bool // `if mut name is`
+	cond        Expr
+	pos         token.Position
+	body_pos    token.Position
+	comments    []Comment
+	is_mut_name bool // `if mut name is`
 pub mut:
-	stmts        []Stmt
-	smartcast    bool // true when cond is `x is SumType`, set in checker.if_expr // no longer needed with union sum types TODO: remove
+	stmts       []Stmt
+	smartcast   bool // true when cond is `x is SumType`, set in checker.if_expr // no longer needed with union sum types TODO: remove
 }
 
 pub struct UnsafeExpr {
@@ -559,19 +558,17 @@ pub mut:
 
 pub struct MatchExpr {
 pub:
-	tok_kind       token.Kind
-	cond           Expr
-	branches       []MatchBranch
-	pos            token.Position
-	is_mut         bool // `match mut ast_node {`
-	var_name       string // `match cond as var_name {`
-	is_union_match bool // temporary union key after match
+	tok_kind      token.Kind
+	cond          Expr
+	branches      []MatchBranch
+	pos           token.Position
+	is_mut        bool // `match mut ast_node {`
 pub mut:
-	is_expr        bool // returns a value
-	return_type    table.Type
-	cond_type      table.Type // type of `x` in `match x {`
-	expected_type  table.Type // for debugging only
-	is_sum_type    bool
+	is_expr       bool // returns a value
+	return_type   table.Type
+	cond_type     table.Type // type of `x` in `match x {`
+	expected_type table.Type // for debugging only
+	is_sum_type   bool
 }
 
 pub struct MatchBranch {
@@ -748,17 +745,8 @@ pub:
 	comments    []Comment
 }
 
-pub struct SumTypeDecl {
-pub:
-	name      string
-	is_pub    bool
-	sub_types []table.Type
-	pos       token.Position
-	comments  []Comment
-}
-
 // New implementation of sum types
-pub struct UnionSumTypeDecl {
+pub struct SumTypeDecl {
 pub:
 	name      string
 	is_pub    bool
@@ -1058,7 +1046,7 @@ pub mut:
 
 [inline]
 pub fn (expr Expr) is_blank_ident() bool {
-	match union expr {
+	match expr {
 		Ident { return expr.kind == .blank_ident }
 		else { return false }
 	}
@@ -1066,7 +1054,7 @@ pub fn (expr Expr) is_blank_ident() bool {
 
 pub fn (expr Expr) position() token.Position {
 	// all uncommented have to be implemented
-	match union expr {
+	match expr {
 		// KEKW2
 		AnonFn {
 			return expr.decl.pos
@@ -1102,7 +1090,7 @@ pub fn (expr Expr) position() token.Position {
 }
 
 pub fn (expr Expr) is_lvalue() bool {
-	match union expr {
+	match expr {
 		Ident { return true }
 		CTempVar { return true }
 		IndexExpr { return expr.left.is_lvalue() }
@@ -1113,7 +1101,7 @@ pub fn (expr Expr) is_lvalue() bool {
 }
 
 pub fn (expr Expr) is_expr() bool {
-	match union expr {
+	match expr {
 		IfExpr { return expr.is_expr }
 		MatchExpr { return expr.is_expr }
 		else {}
@@ -1152,7 +1140,7 @@ pub fn (stmt Stmt) position() token.Position {
 		AssertStmt, AssignStmt, Block, BranchStmt, CompFor, ConstDecl, DeferStmt, EnumDecl, ExprStmt, FnDecl, ForCStmt, ForInStmt, ForStmt, GotoLabel, GotoStmt, Import, Return, StructDecl, GlobalDecl, HashStmt, InterfaceDecl, Module, SqlStmt { return stmt.pos }
 		GoStmt { return stmt.call_expr.position() }
 		TypeDecl { match stmt {
-				AliasTypeDecl, FnTypeDecl, SumTypeDecl, UnionSumTypeDecl { return stmt.pos }
+				AliasTypeDecl, FnTypeDecl, SumTypeDecl { return stmt.pos }
 			} }
 		// Please, do NOT use else{} here.
 		// This match is exhaustive *on purpose*, to help force

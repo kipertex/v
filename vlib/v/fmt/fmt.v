@@ -85,16 +85,6 @@ pub fn (mut f Fmt) process_file_imports(file &ast.File) {
 	}
 }
 
-/*
-fn (mut f Fmt) find_comment(line_nr int) {
-	for comment in f.file.comments {
-		if comment.line_nr == line_nr {
-			f.writeln('// FFF $comment.line_nr $comment.text')
-			return
-		}
-	}
-}
-*/
 pub fn (mut f Fmt) write(s string) {
 	if !f.buffering {
 		if f.indent > 0 && f.empty_line {
@@ -464,7 +454,7 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 			f.write('sql ')
 			f.expr(node.db_expr)
 			f.writeln(' {')
-			match node.kind as k {
+			match node.kind {
 				.insert {
 					f.writeln('\tinsert $node.object_var_name into ${util.strip_mod_name(node.table_name)}')
 				}
@@ -490,11 +480,11 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 			f.writeln('}')
 		}
 		ast.StructDecl {
-			f.struct_decl(it)
+			f.struct_decl(node)
 		}
 		ast.TypeDecl {
 			// already handled in f.imports
-			f.type_decl(it)
+			f.type_decl(node)
 		}
 	}
 }
@@ -559,26 +549,6 @@ pub fn (mut f Fmt) type_decl(node ast.TypeDecl) {
 				f.write('pub ')
 			}
 			f.write('type $node.name = ')
-			mut sum_type_names := []string{}
-			for t in node.sub_types {
-				sum_type_names << f.table.type_to_str(t)
-			}
-			sum_type_names.sort()
-			for i, name in sum_type_names {
-				f.write(name)
-				if i < sum_type_names.len - 1 {
-					f.write(' | ')
-				}
-				f.wrap_long_line(2, true)
-			}
-			// f.write(sum_type_names.join(' | '))
-			comments << node.comments
-		}
-		ast.UnionSumTypeDecl {
-			if node.is_pub {
-				f.write('pub ')
-			}
-			f.write('__type $node.name = ')
 			mut sum_type_names := []string{}
 			for t in node.sub_types {
 				sum_type_names << f.table.type_to_str(t)
@@ -771,7 +741,7 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 	if f.is_debug {
 		eprintln('expr: ${node.position():-42} | node: ${typeof(node):-20} | $node.str()')
 	}
-	match union mut node {
+	match mut node {
 		ast.CTempVar {
 			eprintln('ast.CTempVar of $node.orig.str() should be generated/used only in cgen')
 		}
@@ -972,8 +942,8 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 						f.write('> ')
 					}
 					f.single_line_if = true
-					match branch.stmt as stmt {
-						ast.ExprStmt { f.expr(stmt.expr) }
+					match branch.stmt {
+						ast.ExprStmt { f.expr(branch.stmt.expr) }
 						else { f.stmt(branch.stmt) }
 					}
 					f.single_line_if = false
@@ -1224,8 +1194,14 @@ struct CommentsOptions {
 
 pub fn (mut f Fmt) comment(node ast.Comment, options CommentsOptions) {
 	if options.iembed {
-		x := node.text.replace('\n', ' ').trim_left('\x01')
-		f.write('/* $x */')
+		x := node.text.trim_left('\x01')
+		if x.contains('\n') {
+			f.writeln('/*')
+			f.writeln(x)
+			f.write('*/')
+		} else {
+			f.write('/* $x */')
+		}
 		return
 	}
 	if !node.text.contains('\n') {
@@ -1366,7 +1342,7 @@ pub fn (mut f Fmt) infix_expr(node ast.InfixExpr) {
 	}
 	f.expr_bufs << f.out.str()
 	mut penalty := 3
-	match union mut node.left {
+	match mut node.left {
 		ast.InfixExpr {
 			if int(token.precedences[node.left.op]) > int(token.precedences[node.op]) {
 				penalty--
@@ -1377,7 +1353,7 @@ pub fn (mut f Fmt) infix_expr(node ast.InfixExpr) {
 		}
 		else {}
 	}
-	match union node.right {
+	match node.right {
 		ast.InfixExpr { penalty-- }
 		ast.ParExpr { penalty = 1 }
 		else {}
@@ -1416,15 +1392,6 @@ pub fn (mut f Fmt) if_expr(it ast.IfExpr) {
 		(it.is_expr || f.is_assign)
 	f.single_line_if = single_line
 	for i, branch in it.branches {
-		// Check `sum is T` smartcast
-		mut smartcast_as := false
-		if branch.cond is ast.InfixExpr {
-			if branch.cond.op == .key_is {
-				// left_as_name is either empty, branch.cond.left.str() or the `as` name
-				smartcast_as = branch.left_as_name.len > 0 &&
-					branch.cond.left.str() != branch.left_as_name
-			}
-		}
 		if i == 0 {
 			// first `if`
 			f.comments(branch.comments, {})
@@ -1444,9 +1411,6 @@ pub fn (mut f Fmt) if_expr(it ast.IfExpr) {
 				f.write('mut ')
 			}
 			f.expr(branch.cond)
-			if smartcast_as {
-				f.write(' as $branch.left_as_name')
-			}
 			f.write(' ')
 		}
 		f.write('{')
@@ -1564,22 +1528,12 @@ pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
 
 pub fn (mut f Fmt) match_expr(it ast.MatchExpr) {
 	f.write('match ')
-	// TODO: temporary, remove again
-	if it.is_union_match {
-		f.write('union ')
-	}
 	if it.is_mut {
 		f.write('mut ')
 	}
 	f.expr(it.cond)
 	if it.cond is ast.Ident {
 		f.it_name = it.cond.name
-	} else if it.cond is ast.SelectorExpr {
-		// `x.y as z`
-		// if ident.name != it.var_name && it.var_name != '' {
-	}
-	if it.var_name != '' && f.it_name != it.var_name {
-		f.write(' as $it.var_name')
 	}
 	f.writeln(' {')
 	f.indent++
@@ -1704,7 +1658,7 @@ fn stmt_is_single_line(stmt ast.Stmt) bool {
 }
 
 fn expr_is_single_line(expr ast.Expr) bool {
-	match union expr {
+	match expr {
 		ast.IfExpr { return false }
 		ast.Comment { return false }
 		else {}

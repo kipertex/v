@@ -287,7 +287,7 @@ fn (mut p Parser) decode_string() ?Any {
 					continue
 				}
 				else { return error('invalid backslash escape.') }
-			} 
+			}
 
 			if int(peek) == 85 {
 				return error('unicode endpoints must be in lowercase `u`.')

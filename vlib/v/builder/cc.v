@@ -288,6 +288,8 @@ fn (mut v Builder) cc() {
 		args << '-fPIC' // -Wl,-z,defs'
 		$if macos {
 			v.pref.out_name += '.dylib'
+		} $else $if windows {
+			v.pref.out_name += '.dll'
 		} $else {
 			v.pref.out_name += '.so'
 		}
@@ -495,7 +497,7 @@ fn (mut v Builder) cc() {
 			}
 		}
 	}
-	if is_cc_tcc {
+	if is_cc_tcc && 'no_backtrace' !in v.pref.compile_defines {
 		args << '-bt25'
 	}
 	// Without these libs compilation will fail on Linux

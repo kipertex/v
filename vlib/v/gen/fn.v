@@ -100,8 +100,8 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 				// if !(g.pref.build_mode == .build_module && g.is_builtin_mod) {
 				// If we are building vlib/builtin, we need all private functions like array_get
 				// to be public, so that all V programs can access them.
-				g.write('static ')
-				g.definitions.write('static ')
+				g.write('VV_LOCAL_SYMBOL ')
+				g.definitions.write('VV_LOCAL_SYMBOL ')
 			}
 		}
 		fn_header := if msvc_attrs.len > 0 { '$type_name $msvc_attrs ${name}(' } else { '$type_name ${name}(' }
@@ -170,7 +170,7 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 		if attr.name == 'export' {
 			g.writeln('// export alias: $attr.arg -> $name')
 			export_alias := '$type_name ${attr.arg}($arg_str)'
-			g.definitions.writeln('$export_alias;')
+			g.definitions.writeln('VV_EXPORTED_SYMBOL $export_alias; // exported fn $it.name')
 			g.writeln('$export_alias {')
 			g.write('\treturn ${name}(')
 			g.write(fargs.join(', '))
@@ -367,7 +367,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		}
 	}
 	if left_sym.kind == .sum_type && node.name == 'type_name' {
-		g.write('tos3( /* $left_sym.name */ v_typeof_sumtype_${node.receiver_type}( (')
+		g.write('tos3( /* $left_sym.name */ v_typeof_unionsumtype_${node.receiver_type}( (')
 		g.expr(node.left)
 		g.write(').typ ))')
 		return
@@ -549,9 +549,9 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			g.checker_bug('print arg.typ is 0', node.pos)
 		}
 		mut sym := g.table.get_type_symbol(typ)
-		if sym.info is table.Alias as alias_info {
-			typ = alias_info.parent_type
-			sym = g.table.get_type_symbol(alias_info.parent_type)
+		if mut sym.info is table.Alias {
+			typ = sym.info.parent_type
+			sym = g.table.get_type_symbol(typ)
 		}
 		// check if alias parent also not a string
 		if typ != table.string_type {
@@ -569,7 +569,7 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 				g.writeln('); ${print_method}($tmp); string_free(&$tmp); //MEM2 $styp')
 			} else {
 				expr := node.args[0].expr
-				is_var := match union expr {
+				is_var := match expr {
 					ast.SelectorExpr { true }
 					ast.Ident { true }
 					else { false }
@@ -645,6 +645,9 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 		return
 	}
 	if g.is_js_call {
+		return
+	}
+	if g.inside_const {
 		return
 	}
 	free_tmp_arg_vars = false // set the flag to true only if we have at least one arg to free
@@ -743,21 +746,20 @@ fn (mut g Gen) autofree_call_postgen(node_pos int) {
 				// // TODO why 0?
 				// continue
 				// }
-				v := *obj
-				is_optional := v.typ.has_flag(.optional)
+				is_optional := obj.typ.has_flag(.optional)
 				if is_optional {
 					// TODO: free optionals
 					continue
 				}
-				if !v.is_autofree_tmp {
+				if !obj.is_autofree_tmp {
 					continue
 				}
-				if v.is_used {
+				if obj.is_used {
 					// this means this tmp expr var has already been freed
 					continue
 				}
 				obj.is_used = true
-				g.autofree_variable(v)
+				g.autofree_variable(obj)
 				// g.nr_vars_to_free--
 			}
 			else {}
@@ -778,7 +780,7 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 			break
 		}
 		use_tmp_var_autofree := g.autofree && g.pref.experimental && arg.typ == table.string_type &&
-			arg.is_tmp_autofree
+			arg.is_tmp_autofree && !g.inside_const
 		// g.write('/* af=$arg.is_tmp_autofree */')
 		mut is_interface := false
 		// some c fn definitions dont have args (cfns.v) or are not updated in checker

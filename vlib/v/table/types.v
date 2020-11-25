@@ -16,7 +16,7 @@ import strings
 pub type Type = int
 
 pub type TypeInfo = Aggregate | Alias | Array | ArrayFixed | Chan | Enum | FnType | GenericStructInst |
-	Interface | Map | MultiReturn | Struct | SumType | UnionSumType
+	Interface | Map | MultiReturn | Struct | SumType
 
 pub enum Language {
 	v
@@ -405,7 +405,6 @@ pub enum Kind {
 	generic_struct_inst
 	multi_return
 	sum_type
-	union_sum_type
 	alias
 	enum_
 	function
@@ -421,56 +420,56 @@ pub fn (t &TypeSymbol) str() string {
 
 [inline]
 pub fn (t &TypeSymbol) enum_info() Enum {
-	match t.info {
-		Enum { return *it }
+	match mut t.info {
+		Enum { return t.info }
 		else { panic('TypeSymbol.enum_info(): no enum info for type: $t.name') }
 	}
 }
 
 [inline]
 pub fn (t &TypeSymbol) mr_info() MultiReturn {
-	match t.info {
-		MultiReturn { return *it }
+	match mut t.info {
+		MultiReturn { return t.info }
 		else { panic('TypeSymbol.mr_info(): no multi return info for type: $t.name') }
 	}
 }
 
 [inline]
 pub fn (t &TypeSymbol) array_info() Array {
-	match t.info {
-		Array { return *it }
+	match mut t.info {
+		Array { return t.info }
 		else { panic('TypeSymbol.array_info(): no array info for type: $t.name') }
 	}
 }
 
 [inline]
 pub fn (t &TypeSymbol) array_fixed_info() ArrayFixed {
-	match t.info {
-		ArrayFixed { return *it }
+	match mut t.info {
+		ArrayFixed { return t.info }
 		else { panic('TypeSymbol.array_fixed(): no array fixed info for type: $t.name') }
 	}
 }
 
 [inline]
 pub fn (t &TypeSymbol) chan_info() Chan {
-	match t.info {
-		Chan { return *it }
+	match mut t.info {
+		Chan { return t.info }
 		else { panic('TypeSymbol.chan_info(): no chan info for type: $t.name') }
 	}
 }
 
 [inline]
 pub fn (t &TypeSymbol) map_info() Map {
-	match t.info {
-		Map { return *it }
+	match mut t.info {
+		Map { return t.info }
 		else { panic('TypeSymbol.map_info(): no map info for type: $t.name') }
 	}
 }
 
 [inline]
 pub fn (t &TypeSymbol) struct_info() Struct {
-	match t.info {
-		Struct { return *it }
+	match mut t.info {
+		Struct { return t.info }
 		else { panic('TypeSymbol.struct_info(): no struct info for type: $t.name') }
 	}
 }
@@ -720,7 +719,6 @@ pub fn (k Kind) str() string {
 		.chan { 'chan' }
 		.multi_return { 'multi_return' }
 		.sum_type { 'sum_type' }
-		.union_sum_type { 'union_sum_type' }
 		.alias { 'alias' }
 		.enum_ { 'enum' }
 		.any { 'any' }
@@ -846,23 +844,6 @@ pub mut:
 pub struct SumType {
 pub:
 	variants []Type
-}
-
-pub struct UnionSumType {
-pub:
-	variants []Type
-}
-
-pub fn (table &Table) get_union_sum_type_variants(sum_type UnionSumType) []Type {
-	mut variants := []Type{}
-	for variant in sum_type.variants {
-		sym := table.get_type_symbol(variant)
-		if sym.info is UnionSumType as sym_info {
-			variants << table.get_union_sum_type_variants(sym_info)
-		}
-		variants << variant
-	}
-	return variants
 }
 
 pub fn (table &Table) type_to_str(t Type) string {

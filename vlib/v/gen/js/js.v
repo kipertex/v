@@ -15,7 +15,7 @@ const (
 		'public', 'return', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void',
 		'while', 'with', 'yield']
 	tabs        = ['', '\t', '\t\t', '\t\t\t', '\t\t\t\t', '\t\t\t\t\t', '\t\t\t\t\t\t', '\t\t\t\t\t\t\t',
-		'\t\t\t\t\t\t\t\t',
+		'\t\t\t\t\t\t\t\t', '\t\t\t\t\t\t\t\t\t', '\t\t\t\t\t\t\t\t\t', '\t\t\t\t\t\t\t\t\t'
 	]
 )
 
@@ -259,10 +259,6 @@ pub fn (mut g JsGen) typ(t table.Type) string {
 		}
 		.sum_type {
 			// TODO: Implement sumtypes
-			styp = 'sym_type'
-		}
-		.union_sum_type {
-			// TODO: Implement sumtypes
 			styp = 'union_sym_type'
 		}
 		.alias {
@@ -456,7 +452,7 @@ fn (mut g JsGen) stmt(node ast.Stmt) {
 			g.gen_const_decl(node)
 		}
 		ast.DeferStmt {
-			g.defer_stmts << *node
+			g.defer_stmts << node
 		}
 		ast.EnumDecl {
 			g.gen_enum_decl(node)
@@ -466,7 +462,7 @@ fn (mut g JsGen) stmt(node ast.Stmt) {
 			g.gen_expr_stmt(node)
 		}
 		ast.FnDecl {
-			g.fn_decl = node
+			g.fn_decl = &node
 			g.gen_fn_decl(node)
 		}
 		ast.ForCStmt {
@@ -523,7 +519,7 @@ fn (mut g JsGen) stmt(node ast.Stmt) {
 }
 
 fn (mut g JsGen) expr(node ast.Expr) {
-	match union node {
+	match node {
 		ast.CTempVar {
 			g.write('/* ast.CTempVar: node.name */')
 		}
@@ -1008,12 +1004,16 @@ fn (mut g JsGen) gen_for_stmt(it ast.ForStmt) {
 
 fn (mut g JsGen) gen_go_stmt(node ast.GoStmt) {
 	// x := node.call_expr as ast.CallEpxr // TODO
-	match union node.call_expr {
+	match node.call_expr {
 		ast.CallExpr {
 			mut name := node.call_expr.name
 			if node.call_expr.is_method {
 				receiver_sym := g.table.get_type_symbol(node.call_expr.receiver_type)
 				name = receiver_sym.name + '.' + name
+			}
+			// todo: please add a name feild without the mod name for ast.CallExpr
+			if name.starts_with('$node.call_expr.mod\.') {
+				name = name[node.call_expr.mod.len+1..]
 			}
 			g.writeln('await new Promise(function(resolve){')
 			g.inc_indent()
@@ -1052,7 +1052,7 @@ fn (mut g JsGen) gen_interface_decl(it ast.InterfaceDecl) {
 fn (mut g JsGen) gen_return_stmt(it ast.Return) {
 	if it.exprs.len == 0 {
 		// Returns nothing
-		g.write('return;')
+		g.writeln('return;')
 		return
 	}
 	g.write('return ')
@@ -1175,6 +1175,14 @@ fn (mut g JsGen) gen_call_expr(it ast.CallExpr) {
 	} else {
 		name = g.js_name(it.name)
 	}
+	call_return_is_optional := it.return_type.has_flag(.optional)
+	if call_return_is_optional {
+		g.writeln('(function(){')
+		g.inc_indent()
+		g.writeln('try {')
+		g.inc_indent()
+		g.write('return builtin.unwrap(')
+	}
 	g.expr(it.left)
 	if it.is_method { // foo.bar.baz()
 		sym := g.table.get_type_symbol(it.receiver_type)
@@ -1185,7 +1193,7 @@ fn (mut g JsGen) gen_call_expr(it ast.CallExpr) {
 			g.write(it.name)
 			g.write('(')
 			expr := node.args[0].expr
-			match union expr {
+			match expr {
 				ast.AnonFn {
 					g.gen_fn_decl(expr.decl)
 					g.write(')')
@@ -1224,7 +1232,41 @@ fn (mut g JsGen) gen_call_expr(it ast.CallExpr) {
 			g.write(', ')
 		}
 	}
+	// end method call
 	g.write(')')
+	if call_return_is_optional {
+		// end unwrap
+		g.writeln(')')
+		g.dec_indent()
+		// begin catch block
+		g.writeln('} catch(err) {')
+		g.inc_indent()
+		// gen or block contents
+		match it.or_block.kind {
+			.block {
+				if it.or_block.stmts.len > 1 {
+					g.stmts(it.or_block.stmts[..it.or_block.stmts.len-1])
+				}
+				g.write('return ')
+				g.stmt(it.or_block.stmts.last())
+			}
+			.propagate {
+				panicstr := '`optional not set (\${err})`'
+				if g.file.mod.name == 'main' && g.fn_decl.name == 'main.main' {
+					g.writeln('return builtin.panic($panicstr)')
+				} else {
+					g.writeln('builtin.js_throw(err)')
+				}
+			}
+			else {}
+		}
+		// end catch
+		g.dec_indent()
+		g.writeln('}')
+		// end anon fn
+		g.dec_indent()
+		g.write('})()')
+	}
 }
 
 fn (mut g JsGen) gen_ident(node ast.Ident) {
