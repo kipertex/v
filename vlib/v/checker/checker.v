@@ -313,8 +313,11 @@ pub fn (mut c Checker) type_decl(node ast.TypeDecl) {
 		}
 		ast.SumTypeDecl {
 			c.check_valid_pascal_case(node.name, 'sum type', node.pos)
-			for typ in node.sub_types {
-				mut sym := c.table.get_type_symbol(typ)
+			for variant in node.variants {
+				if variant.typ.is_ptr() {
+					c.error('sum type cannot hold a reference type', variant.pos)
+				}
+				mut sym := c.table.get_type_symbol(variant.typ)
 				if sym.kind == .placeholder {
 					c.error("type `$sym.source_name` doesn't exist", node.pos)
 				} else if sym.kind == .interface_ {
@@ -589,7 +592,7 @@ pub fn (mut c Checker) struct_init(mut struct_init ast.StructInit) table.Type {
 						}
 					}
 					if !found {
-						c.error('field `${type_sym.source_name}.$field.name` is required',
+						c.error('field `${type_sym.source_name}.$field.name` must be initialized',
 							struct_init.pos)
 					}
 				}
@@ -623,12 +626,30 @@ pub fn (mut c Checker) infix_expr(mut infix_expr ast.InfixExpr) table.Type {
 		c.warn('pointer arithmetic is only allowed in `unsafe` blocks', left_pos)
 	}
 	mut return_type := left_type
+	if infix_expr.op != .key_is {
+		match mut infix_expr.left {
+			ast.Ident, ast.SelectorExpr {
+				if infix_expr.left.is_mut {
+					c.error('remove unnecessary `mut`', infix_expr.left.mut_pos)
+				}
+			}
+			else {}
+		}
+	}
 	// Single side check
 	// Place these branches according to ops' usage frequency to accelerate.
 	// TODO: First branch includes ops where single side check is not needed, or needed but hasn't been implemented.
 	// TODO: Some of the checks are not single side. Should find a better way to organize them.
 	match infix_expr.op {
 		// .eq, .ne, .gt, .lt, .ge, .le, .and, .logical_or, .dot, .key_as, .right_shift {}
+		.eq, .ne {
+			is_alias_eq_struct := left.kind == .alias && right.kind == .struct_
+			is_struct_eq_alias := left.kind == .struct_ && right.kind == .alias
+			if is_alias_eq_struct || is_struct_eq_alias {
+				c.error('possible type mismatch of compared values of `$infix_expr.op` operation',
+					infix_expr.pos)
+			}
+		}
 		.key_in, .not_in {
 			match right.kind {
 				.array {
@@ -824,26 +845,22 @@ pub fn (mut c Checker) infix_expr(mut infix_expr ast.InfixExpr) table.Type {
 			}
 			return table.void_type
 		}
-		else {
-			if infix_expr.op in [.and, .logical_or] {
-				if infix_expr.left_type != table.bool_type_idx {
-					c.error('left operand for `$infix_expr.op` is not a boolean', infix_expr.left.position())
-				}
-				if infix_expr.right_type != table.bool_type_idx {
-					c.error('right operand for `$infix_expr.op` is not a boolean', infix_expr.right.position())
-				}
+		.and, .logical_or {
+			if infix_expr.left_type != table.bool_type_idx {
+				c.error('left operand for `$infix_expr.op` is not a boolean', infix_expr.left.position())
+			}
+			if infix_expr.right_type != table.bool_type_idx {
+				c.error('right operand for `$infix_expr.op` is not a boolean', infix_expr.right.position())
 			}
 			// use `()` to make the boolean expression clear error
 			// for example: `(a && b) || c` instead of `a && b || c`
-			if infix_expr.op in [.logical_or, .and] {
-				if mut infix_expr.left is ast.InfixExpr {
-					if infix_expr.left.op in [.logical_or, .and] &&
-						infix_expr.left.op != infix_expr.op {
-						c.error('use `()` to make the boolean expression clear', infix_expr.pos)
-					}
+			if mut infix_expr.left is ast.InfixExpr {
+				if infix_expr.left.op != infix_expr.op && infix_expr.left.op in [.logical_or, .and] {
+					c.error('use `()` to make the boolean expression clear', infix_expr.pos)
 				}
 			}
 		}
+		else {}
 	}
 	// TODO: Absorb this block into the above single side check block to accelerate.
 	if left_type == table.bool_type && infix_expr.op !in [.eq, .ne, .logical_or, .and] {
@@ -1018,8 +1035,7 @@ pub fn (mut c Checker) call_expr(mut call_expr ast.CallExpr) table.Type {
 	// Now call `call_method` or `call_fn` for specific checks.
 	typ := if call_expr.is_method { c.call_method(mut call_expr) } else { c.call_fn(mut call_expr) }
 	// autofree: mark args that have to be freed (after saving them in tmp exprs)
-	free_tmp_arg_vars := c.pref.autofree && c.pref.experimental && !c.is_builtin_mod &&
-		call_expr.args.len > 0 && !call_expr.args[0].typ.has_flag(.optional)
+	free_tmp_arg_vars := c.pref.autofree && !c.is_builtin_mod && call_expr.args.len > 0 && !call_expr.args[0].typ.has_flag(.optional)
 	if free_tmp_arg_vars && !c.inside_const {
 		for i, arg in call_expr.args {
 			if arg.typ != table.string_type {
@@ -1050,15 +1066,15 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ table.Type, call_e
 	match arg_expr {
 		ast.AnonFn {
 			if arg_expr.decl.params.len > 1 {
-				c.error('function needs exactly 1 argument', call_expr.pos)
+				c.error('function needs exactly 1 argument', arg_expr.decl.pos)
 			} else if is_map &&
 				(arg_expr.decl.return_type != elem_typ || arg_expr.decl.params[0].typ != elem_typ) {
 				c.error('type mismatch, should use `fn(a $elem_sym.source_name) $elem_sym.source_name {...}`',
-					call_expr.pos)
+					arg_expr.decl.pos)
 			} else if !is_map &&
 				(arg_expr.decl.return_type != table.bool_type || arg_expr.decl.params[0].typ != elem_typ) {
 				c.error('type mismatch, should use `fn(a $elem_sym.source_name) bool {...}`',
-					call_expr.pos)
+					arg_expr.decl.pos)
 			}
 		}
 		ast.Ident {
@@ -1071,11 +1087,11 @@ fn (mut c Checker) check_map_and_filter(is_map bool, elem_typ table.Type, call_e
 					c.error('function needs exactly 1 argument', call_expr.pos)
 				} else if is_map && (func.return_type != elem_typ || func.params[0].typ != elem_typ) {
 					c.error('type mismatch, should use `fn(a $elem_sym.source_name) $elem_sym.source_name {...}`',
-						call_expr.pos)
+						arg_expr.pos)
 				} else if !is_map &&
 					(func.return_type != table.bool_type || func.params[0].typ != elem_typ) {
 					c.error('type mismatch, should use `fn(a $elem_sym.source_name) bool {...}`',
-						call_expr.pos)
+						arg_expr.pos)
 				}
 			}
 		}
@@ -1110,13 +1126,15 @@ pub fn (mut c Checker) call_method(mut call_expr ast.CallExpr) table.Type {
 		is_sort := method_name == 'sort'
 		if is_filter_map || is_sort {
 			array_info := left_type_sym.info as table.Array
-			mut scope := c.file.scope.innermost(call_expr.pos.pos)
+			args_pos := call_expr.pos.pos + call_expr.name.len
+			mut scope := c.file.scope.innermost(args_pos)
 			if is_filter_map {
-				scope.update_var_type('it', array_info.elem_type)
+				// position of `it` doesn't matter
+				scope_register_it(mut scope, call_expr.pos, array_info.elem_type)
 			} else if is_sort {
 				c.fail_if_immutable(call_expr.left)
-				scope.update_var_type('a', array_info.elem_type)
-				scope.update_var_type('b', array_info.elem_type)
+				// position of `a` and `b` doesn't matter, they're the same
+				scope_register_ab(mut scope, call_expr.pos, array_info.elem_type)
 				// Verify `.sort(a < b)`
 				if call_expr.args.len > 0 {
 					if call_expr.args[0].expr !is ast.InfixExpr {
@@ -1821,20 +1839,20 @@ pub fn (mut c Checker) selector_expr(mut selector_expr ast.SelectorExpr) table.T
 // TODO: non deferred
 pub fn (mut c Checker) return_stmt(mut return_stmt ast.Return) {
 	c.expected_type = c.cur_fn.return_type
-	if return_stmt.exprs.len > 0 && c.expected_type == table.void_type {
+	expected_type := c.unwrap_generic(c.expected_type)
+	expected_type_sym := c.table.get_type_symbol(expected_type)
+	if return_stmt.exprs.len > 0 && c.cur_fn.return_type == table.void_type {
 		c.error('too many arguments to return, current function does not return anything',
 			return_stmt.pos)
 		return
 	} else if return_stmt.exprs.len == 0 && !(c.expected_type == table.void_type ||
-		c.table.get_type_symbol(c.expected_type).kind == .void) {
+		expected_type_sym.kind == .void) {
 		c.error('too few arguments to return', return_stmt.pos)
 		return
 	}
 	if return_stmt.exprs.len == 0 {
 		return
 	}
-	expected_type := c.unwrap_generic(c.expected_type)
-	expected_type_sym := c.table.get_type_symbol(expected_type)
 	exp_is_optional := expected_type.has_flag(.optional)
 	mut expected_types := [expected_type]
 	if expected_type_sym.kind == .multi_return {
@@ -2251,11 +2269,28 @@ pub fn (mut c Checker) assign_stmt(mut assign_stmt ast.AssignStmt) {
 	}
 }
 
-fn (mut c Checker) open_scope(mut parent ast.Scope, start_pos int) &ast.Scope {
-	mut s := ast.new_scope(parent, start_pos)
-	s.end_pos = parent.end_pos
-	parent.children << s
-	return s
+fn scope_register_it(mut s ast.Scope, pos token.Position, typ table.Type) {
+	s.register('it', ast.Var{
+		name: 'it'
+		pos: pos
+		typ: typ
+		is_used: true
+	})
+}
+
+fn scope_register_ab(mut s ast.Scope, pos token.Position, typ table.Type) {
+	s.register('a', ast.Var{
+		name: 'a'
+		pos: pos
+		typ: typ
+		is_used: true
+	})
+	s.register('b', ast.Var{
+		name: 'b'
+		pos: pos
+		typ: typ
+		is_used: true
+	})
 }
 
 fn (mut c Checker) check_array_init_para_type(para string, expr ast.Expr, pos token.Position) {
@@ -2712,19 +2747,19 @@ fn (mut c Checker) hash_stmt(mut node ast.HashStmt) {
 
 fn (mut c Checker) import_stmt(imp ast.Import) {
 	for sym in imp.syms {
-		name := '$imp.mod\.$sym.name'
+		name := '${imp.mod}.$sym.name'
 		if sym.kind == .fn_ {
 			c.table.find_fn(name) or {
-				c.error('module `$imp.mod` has no public fn named `$sym.name\()`', sym.pos)
+				c.error('module `$imp.mod` has no public fn named `${sym.name}()`', sym.pos)
 			}
 		}
 		if sym.kind == .type_ {
 			if type_sym := c.table.find_type(name) {
 				if type_sym.kind == .placeholder || !type_sym.is_public {
-					c.error('module `$imp.mod` has no public type `$sym.name\{}`', sym.pos)
+					c.error('module `$imp.mod` has no public type `$sym.name{}`', sym.pos)
 				}
 			} else {
-				c.error('module `$imp.mod` has no public type `$sym.name\{}`', sym.pos)
+				c.error('module `$imp.mod` has no public type `$sym.name{}`', sym.pos)
 			}
 		}
 	}
@@ -2860,7 +2895,11 @@ pub fn (mut c Checker) expr(node ast.Expr) table.Type {
 				c.nr_warnings += c2.nr_warnings
 				c.nr_errors += c2.nr_errors
 			}
-			return c.table.find_type_idx('vweb.Result')
+			if node.method_name == 'html' {
+				return c.table.find_type_idx('vweb.Result')
+			} else {
+				return table.string_type
+			}
 			// return table.void_type
 		}
 		ast.ConcatExpr {
@@ -3428,11 +3467,6 @@ pub fn (mut c Checker) match_expr(mut node ast.MatchExpr) table.Type {
 	// node.expected_type = c.expected_type
 	// }
 	node.return_type = ret_type
-	if node.is_mut {
-		// Mark `x` in `match mut x {` as changed, and ensure it's mutable
-		// TODO2 enable when code is fixed
-		// c.fail_if_immutable(node.cond)
-	}
 	return ret_type
 }
 
@@ -3524,23 +3558,24 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, type_sym table.TypeSymbol
 				mut expr_type := table.Type(0)
 				if expr_types.len > 1 {
 					mut agg_name := strings.new_builder(20)
+					mut agg_cname := strings.new_builder(20)
 					agg_name.write('(')
 					for i, expr in expr_types {
 						if i > 0 {
 							agg_name.write(' | ')
+							agg_cname.write('___')
 						}
 						type_str := c.table.type_to_str(expr.typ)
-						agg_name.write(if c.is_builtin_mod {
-							type_str
-						} else {
-							'${c.mod}.$type_str'
-						})
+						name := if c.is_builtin_mod { type_str } else { '${c.mod}.$type_str' }
+						agg_name.write(name)
+						agg_cname.write(util.no_dots(name))
 					}
 					agg_name.write(')')
 					name := agg_name.str()
 					expr_type = c.table.register_type_symbol(table.TypeSymbol{
 						name: name
 						source_name: name
+						cname: agg_cname.str()
 						kind: .aggregate
 						mod: c.mod
 						info: table.Aggregate{
@@ -3562,9 +3597,8 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, type_sym table.TypeSymbol
 						if field := scope.find_struct_field(node.cond.expr_type, node.cond.field_name) {
 							sum_type_casts << field.sum_type_casts
 						}
-						is_root_mut := scope.is_selector_root_mutable(c.table, node.cond)
 						// smartcast either if the value is immutable or if the mut argument is explicitly given
-						if (!is_root_mut && !is_mut) || node.is_mut {
+						if !is_mut || node.cond.is_mut {
 							sum_type_casts << expr_type
 							scope.register_struct_field(ast.ScopeStructField{
 								struct_type: node.cond.expr_type
@@ -3585,14 +3619,14 @@ fn (mut c Checker) match_exprs(mut node ast.MatchExpr, type_sym table.TypeSymbol
 							is_already_casted = v.pos.pos == node.cond.pos.pos
 						}
 						// smartcast either if the value is immutable or if the mut argument is explicitly given
-						if (!is_mut || node.is_mut) && !is_already_casted {
+						if (!is_mut || node.cond.is_mut) && !is_already_casted {
 							sum_type_casts << expr_type
 							scope.register(node.cond.name, ast.Var{
 								name: node.cond.name
 								typ: node.cond_type
 								pos: node.cond.pos
 								is_used: true
-								is_mut: node.is_mut
+								is_mut: node.cond.is_mut
 								sum_type_casts: sum_type_casts
 							})
 						}
@@ -3823,7 +3857,7 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) table.Type {
 								}
 								if left_sym.kind == .sum_type {
 									// smartcast either if the value is immutable or if the mut argument is explicitly given
-									if !is_mut || branch.is_mut_name {
+									if !is_mut || infix.left.is_mut {
 										sum_type_casts << right_expr.typ
 										scope.register(infix.left.name, ast.Var{
 											name: infix.left.name
@@ -3856,12 +3890,8 @@ pub fn (mut c Checker) if_expr(mut node ast.IfExpr) table.Type {
 									infix.left.field_name) {
 									sum_type_casts << field.sum_type_casts
 								}
-								is_root_mut := scope.is_selector_root_mutable(c.table,
-									infix.left)
 								// smartcast either if the value is immutable or if the mut argument is explicitly given
-								if ((!is_root_mut && !is_mut) ||
-									branch.is_mut_name) &&
-									left_sym.kind == .sum_type {
+								if (!is_mut || infix.left.is_mut) && left_sym.kind == .sum_type {
 									sum_type_casts << right_expr.typ
 									scope.register_struct_field(ast.ScopeStructField{
 										struct_type: infix.left.expr_type

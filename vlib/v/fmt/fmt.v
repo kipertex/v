@@ -79,7 +79,7 @@ pub fn (mut f Fmt) process_file_imports(file &ast.File) {
 	for imp in file.imports {
 		f.mod2alias[imp.mod.all_after_last('.')] = imp.alias
 		for sym in imp.syms {
-			f.mod2alias['$imp.mod\.$sym.name'] = sym.name
+			f.mod2alias['${imp.mod}.$sym.name'] = sym.name
 			f.mod2alias[sym.name] = sym.name
 		}
 	}
@@ -251,9 +251,6 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 			for i, left in node.left {
 				if left is ast.Ident {
 					var_info := left.var_info()
-					if var_info.is_mut {
-						f.write(var_info.share.str() + ' ')
-					}
 					if var_info.is_static {
 						f.write('static ')
 					}
@@ -550,8 +547,8 @@ pub fn (mut f Fmt) type_decl(node ast.TypeDecl) {
 			}
 			f.write('type $node.name = ')
 			mut sum_type_names := []string{}
-			for t in node.sub_types {
-				sum_type_names << f.table.type_to_str(t)
+			for t in node.variants {
+				sum_type_names << f.table.type_to_str(t.typ)
 			}
 			sum_type_names.sort()
 			for i, name in sum_type_names {
@@ -807,7 +804,11 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 		}
 		ast.ComptimeCall {
 			if node.is_vweb {
-				f.write('$' + 'vweb.html()')
+				if node.method_name == 'html' {
+					f.write('\$vweb.html()')
+				} else {
+					f.write("\$tmpl('$node.args_var')")
+				}
 			} else {
 				f.write('${node.left}.\$${node.method_name}($node.args_var)')
 			}
@@ -831,10 +832,12 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 			f.if_expr(node)
 		}
 		ast.Ident {
-			f.write_language_prefix(node.language)
-			if true {
-			} else {
+			if mut node.info is ast.IdentVar {
+				if node.info.is_mut {
+					f.write(node.info.share.str() + ' ')
+				}
 			}
+			f.write_language_prefix(node.language)
 			if node.name == 'it' && f.it_name != '' && !f.inside_lambda { // allow `it` in lambdas
 				f.write(f.it_name)
 			} else if node.kind == .blank_ident {
@@ -1028,6 +1031,8 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 		ast.StringLiteral {
 			if node.is_raw {
 				f.write('r')
+			} else if node.language == table.Language.c {
+				f.write('c')
 			}
 			if node.val.contains("'") && !node.val.contains('"') {
 				f.write('"$node.val"')
@@ -1407,9 +1412,6 @@ pub fn (mut f Fmt) if_expr(it ast.IfExpr) {
 		}
 		if i < it.branches.len - 1 || !it.has_else {
 			f.write('${dollar}if ')
-			if branch.is_mut_name {
-				f.write('mut ')
-			}
 			f.expr(branch.cond)
 			f.write(' ')
 		}
@@ -1528,9 +1530,6 @@ pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
 
 pub fn (mut f Fmt) match_expr(it ast.MatchExpr) {
 	f.write('match ')
-	if it.is_mut {
-		f.write('mut ')
-	}
 	f.expr(it.cond)
 	if it.cond is ast.Ident {
 		f.it_name = it.cond.name

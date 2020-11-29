@@ -77,7 +77,7 @@ fn (mut g Gen) gen_str_for_type_with_styp(typ table.Type, styp string) string {
 				g.gen_str_for_union_sum_type(sym.info, styp, str_fn_name)
 			}
 			else {
-				verror("could not generate string method $str_fn_name for type \'$styp\'")
+				verror("could not generate string method $str_fn_name for type '$styp'")
 			}
 		}
 	}
@@ -367,6 +367,12 @@ fn (mut g Gen) gen_str_for_struct(info table.Struct, styp string, str_fn_name st
 	g.type_definitions.writeln('string indent_${str_fn_name}($styp x, int indent_count); // auto')
 	g.auto_str_funcs.writeln('string indent_${str_fn_name}($styp x, int indent_count) {')
 	mut clean_struct_v_type_name := styp.replace('__', '.')
+	if clean_struct_v_type_name.contains('_T_') {
+		// TODO: this is a bit hacky. styp shouldn't be even parsed with _T_
+		// use something different than g.typ for styp
+		clean_struct_v_type_name = clean_struct_v_type_name.replace('_T_', '<').replace('_', ', ') +
+			'>'
+	}
 	if styp.ends_with('*') {
 		deref_typ := styp.replace('*', '')
 		g.auto_str_funcs.writeln('\t$deref_typ *it = x;')
@@ -506,7 +512,7 @@ fn (mut g Gen) gen_str_for_union_sum_type(info table.SumType, styp string, str_f
 	for typ in info.variants {
 		mut value_fmt := '%.*s\\000'
 		if typ == table.string_type {
-			value_fmt = "\'$value_fmt\'"
+			value_fmt = "'$value_fmt'"
 		}
 		typ_str := g.typ(typ)
 		mut func_name := if typ_str in gen_fn_names { gen_fn_names[typ_str] } else { g.gen_str_for_type_with_styp(typ,
@@ -515,7 +521,7 @@ fn (mut g Gen) gen_str_for_union_sum_type(info table.SumType, styp string, str_f
 		if sym.kind == .struct_ {
 			func_name = 'indent_$func_name'
 		}
-		g.auto_str_funcs.write('\t\tcase $typ: return _STR("${clean_sum_type_v_type_name}($value_fmt)", 2, ${func_name}(*($typ_str*)x._$typ.idx()')
+		g.auto_str_funcs.write('\t\tcase $typ: return _STR("${clean_sum_type_v_type_name}($value_fmt)", 2, ${func_name}(*($typ_str*)x._$sym.cname')
 		if sym.kind == .struct_ {
 			g.auto_str_funcs.write(', indent_count')
 		}

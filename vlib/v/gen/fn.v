@@ -60,9 +60,10 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 	}
 	mut type_name := g.typ(it.return_type)
 	if g.cur_generic_type != 0 {
-		// foo<T>() => foo_int(), foo_string() etc
+		// foo<T>() => foo_T_int(), foo_T_string() etc
 		gen_name := g.typ(g.cur_generic_type)
-		name += '_' + gen_name
+		// Using _T_ to differentiate between get<string> and get_string
+		name += '_T_' + gen_name
 	}
 	// if g.pref.show_cc && it.is_builtin {
 	// println(name)
@@ -180,17 +181,6 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 	}
 }
 
-/*
-fn (mut g Gen) write_autofree_stmts_when_needed(r ast.Return) {
-	// TODO: write_autofree_stmts_when_needed should account for the current local scope vars.
-	// TODO: write_autofree_stmts_when_needed should not free the returned variables.
-	// It may require rewriting g.return_statement to assign the expressions
-	// to temporary variables, then protecting *them* from autofreeing ...
-	// g.writeln('// autofreeings before return:              -------')
-	// g.writeln(g.autofree_scope_vars(g.fn_decl.body_pos.pos))
-	// g.writeln('//--------------------------------------------------- ') // //g.write( g.autofree_scope_vars(r.pos.pos) )
-}
-*/
 fn (mut g Gen) write_defer_stmts_when_needed() {
 	if g.defer_stmts.len > 0 {
 		g.write_defer_stmts()
@@ -367,7 +357,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		}
 	}
 	if left_sym.kind == .sum_type && node.name == 'type_name' {
-		g.write('tos3( /* $left_sym.name */ v_typeof_unionsumtype_${node.receiver_type}( (')
+		g.write('tos3( /* $left_sym.name */ v_typeof_sumtype_${node.receiver_type}( (')
 		g.expr(node.left)
 		g.write(').typ ))')
 		return
@@ -419,8 +409,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	// g.write('/*${g.typ(node.receiver_type)}*/')
 	// g.write('/*expr_type=${g.typ(node.left_type)} rec type=${g.typ(node.receiver_type)}*/')
 	// }
-	if !node.receiver_type.is_ptr() && node.left_type.is_ptr() && node.name == 'str' &&
-		!g.should_write_asterisk_due_to_match_sumtype(node.left) {
+	if !node.receiver_type.is_ptr() && node.left_type.is_ptr() && node.name == 'str' {
 		g.write('ptr_str(')
 	} else {
 		g.write('${name}(')
@@ -535,8 +524,9 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 		name = c_name(name)
 	}
 	if node.generic_type != table.void_type && node.generic_type != 0 {
-		// `foo<int>()` => `foo_int()`
-		name += '_' + g.typ(node.generic_type)
+		// Using _T_ to differentiate between get<string> and get_string
+		// `foo<int>()` => `foo_T_int()`
+		name += '_T_' + g.typ(node.generic_type)
 	}
 	// TODO2
 	// cgen shouldn't modify ast nodes, this should be moved
@@ -639,8 +629,7 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 	// g.writeln('// autofree_call_pregen()')
 	// Create a temporary var before fn call for each argument in order to free it (only if it's a complex expression,
 	// like `foo(get_string())` or `foo(a + b)`
-	mut free_tmp_arg_vars := g.autofree && g.pref.experimental && !g.is_builtin_mod &&
-		node.args.len > 0 && !node.args[0].typ.has_flag(.optional) // TODO copy pasta checker.v
+	mut free_tmp_arg_vars := g.autofree && !g.is_builtin_mod && node.args.len > 0 && !node.args[0].typ.has_flag(.optional) // TODO copy pasta checker.v
 	if !free_tmp_arg_vars {
 		return
 	}
@@ -779,8 +768,8 @@ fn (mut g Gen) call_args(node ast.CallExpr) {
 		if gen_vargs && i == expected_types.len - 1 {
 			break
 		}
-		use_tmp_var_autofree := g.autofree && g.pref.experimental && arg.typ == table.string_type &&
-			arg.is_tmp_autofree && !g.inside_const
+		use_tmp_var_autofree := g.autofree && arg.typ == table.string_type && arg.is_tmp_autofree &&
+			!g.inside_const
 		// g.write('/* af=$arg.is_tmp_autofree */')
 		mut is_interface := false
 		// some c fn definitions dont have args (cfns.v) or are not updated in checker
