@@ -63,13 +63,13 @@ pub fn (mut p Parser) call_expr(language table.Language, mod string) ast.CallExp
 		p.inside_or_expr = true
 		p.next()
 		p.open_scope()
-		p.scope.register('err', ast.Var{
+		p.scope.register(ast.Var{
 			name: 'err'
 			typ: table.string_type
 			pos: p.tok.position()
 			is_used: true
 		})
-		p.scope.register('errcode', ast.Var{
+		p.scope.register(ast.Var{
 			name: 'errcode'
 			typ: table.int_type
 			pos: p.tok.position()
@@ -251,7 +251,7 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 				p.error_with_pos('redefinition of parameter `$param.name`', param.pos)
 				break
 			}
-			p.scope.register(param.name, ast.Var{
+			p.scope.register(ast.Var{
 				name: param.name
 				typ: param.typ
 				is_mut: param.is_mut
@@ -273,6 +273,12 @@ fn (mut p Parser) fn_decl() ast.FnDecl {
 	if is_method {
 		mut type_sym := p.table.get_type_symbol(rec_type)
 		ret_type_sym := p.table.get_type_symbol(return_type)
+		// Do not allow to modify / add methods to types from other modules
+		// arrays/maps dont belong to a module only their element types do
+		// we could also check if kind is .array,  .array_fixed, .map instead of mod.len
+		if type_sym.mod.len > 0 && type_sym.mod != p.mod && type_sym.language == .v {
+			p.error('cannot define new methods on non-local type $type_sym.name')
+		}
 		// p.warn('reg method $type_sym.name . $name ()')
 		type_sym_method_idx = type_sym.register_method(table.Fn{
 			name: name
@@ -364,7 +370,7 @@ fn (mut p Parser) anon_fn() ast.AnonFn {
 	// TODO generics
 	args, _, is_variadic := p.fn_args()
 	for arg in args {
-		p.scope.register(arg.name, ast.Var{
+		p.scope.register(ast.Var{
 			name: arg.name
 			typ: arg.typ
 			is_mut: arg.is_mut

@@ -465,13 +465,16 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 						} else {
 							f.write(' ')
 						}
+						f.wrap_long_line(2, true)
 					}
 					f.write('where ')
 					f.expr(node.where_expr)
 					f.writeln('')
 				}
 				.delete {
-					// TODO delete
+					f.write('\tdelete from ${util.strip_mod_name(node.table_name)} where ')
+					f.expr(node.where_expr)
+					f.writeln('')
 				}
 			}
 			f.writeln('}')
@@ -1108,8 +1111,8 @@ pub fn (mut f Fmt) expr(node ast.Expr) {
 	}
 }
 
-pub fn (mut f Fmt) wrap_long_line(penalty int, add_indent bool) bool {
-	if f.line_len <= max_len[penalty] {
+pub fn (mut f Fmt) wrap_long_line(penalty_idx int, add_indent bool) bool {
+	if f.line_len <= max_len[penalty_idx] {
 		return false
 	}
 	if f.out.buf[f.out.buf.len - 1] == ` ` {

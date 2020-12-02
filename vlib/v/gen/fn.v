@@ -363,12 +363,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		return
 	}
 	if node.name == 'str' {
-		mut styp := g.typ(node.receiver_type)
-		if node.receiver_type.is_ptr() {
-			styp = styp.replace('*', '')
-		}
-		g.gen_str_for_type_with_styp(node.receiver_type, styp)
+		g.gen_str_for_type(node.receiver_type)
 	}
+	mut has_cast := false
 	// TODO performance, detect `array` method differently
 	if left_sym.kind == .array && node.name in
 		['repeat', 'sort_with_compare', 'free', 'push_many', 'trim', 'first', 'last', 'pop', 'clone', 'reverse', 'slice'] {
@@ -378,7 +375,8 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		receiver_type_name = 'array'
 		if node.name in ['last', 'first', 'pop'] {
 			return_type_str := g.typ(node.return_type)
-			g.write('*($return_type_str*)')
+			has_cast = true
+			g.write('(*($return_type_str*)')
 		}
 	}
 	mut name := util.no_dots('${receiver_type_name}_$node.name')
@@ -432,6 +430,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	} else {
 		g.expr(node.left)
 	}
+	if has_cast {
+		g.write(')')
+	}
 	is_variadic := node.expected_arg_types.len > 0 && node.expected_arg_types[node.expected_arg_types.len -
 		1].has_flag(.variadic)
 	if node.args.len > 0 || is_variadic {
@@ -483,10 +484,14 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 			g.gen_json_for_type(node.args[0].typ)
 			json_type_str = g.typ(node.args[0].typ)
 			// `json__encode` => `json__encode_User`
-			encode_name := c_name(name) + '_' + util.no_dots(json_type_str)
+			// encode_name := c_name(name) + '_' + util.no_dots(json_type_str)
+			encode_name := js_enc_name(json_type_str)
 			g.writeln('// json.encode')
 			g.write('cJSON* $json_obj = ${encode_name}(')
 			// g.call_args(node.args, node.expected_arg_types) // , [])
+			if node.args[0].typ.is_ptr() {
+				g.write('*')
+			}
 			g.call_args(node)
 			g.writeln(');')
 			tmp2 = g.new_tmp_var()
@@ -545,55 +550,18 @@ fn (mut g Gen) fn_call(node ast.CallExpr) {
 		}
 		// check if alias parent also not a string
 		if typ != table.string_type {
-			mut styp := g.typ(typ)
-			if typ.is_ptr() {
-				styp = styp.replace('*', '')
-			}
-			mut str_fn_name := g.gen_str_for_type_with_styp(typ, styp)
+			expr := node.args[0].expr
 			if g.autofree && !typ.has_flag(.optional) {
 				// Create a temporary variable so that the value can be freed
 				tmp := g.new_tmp_var()
 				// tmps << tmp
-				g.write('string $tmp = ${str_fn_name}(')
-				g.expr(node.args[0].expr)
-				g.writeln('); ${print_method}($tmp); string_free(&$tmp); //MEM2 $styp')
+				g.write('string $tmp = ')
+				g.gen_expr_to_string(expr, typ)
+				g.writeln('; ${print_method}($tmp); string_free(&$tmp);')
 			} else {
-				expr := node.args[0].expr
-				is_var := match expr {
-					ast.SelectorExpr { true }
-					ast.Ident { true }
-					else { false }
-				}
-				if typ.is_ptr() && sym.kind != .struct_ {
-					// ptr_str() for pointers
-					styp = 'ptr'
-					str_fn_name = 'ptr_str'
-				}
-				if sym.kind == .enum_ {
-					if is_var {
-						g.write('${print_method}(${str_fn_name}(')
-					} else {
-						// when no var, print string directly
-						g.write('${print_method}(tos3("')
-					}
-					if typ.is_ptr() {
-						// dereference
-						g.write('*')
-					}
-					g.enum_expr(expr)
-					if !is_var {
-						// end of string
-						g.write('"')
-					}
-				} else {
-					g.write('${print_method}(${str_fn_name}(')
-					if typ.is_ptr() && sym.kind == .struct_ {
-						// dereference
-						g.write('*')
-					}
-					g.expr(expr)
-				}
-				g.write('))')
+				g.write('${print_method}(')
+				g.gen_expr_to_string(expr, typ)
+				g.write(')')
 			}
 			print_auto_str = true
 		}
@@ -681,7 +649,7 @@ fn (mut g Gen) autofree_call_pregen(node ast.CallExpr) {
 			}
 			s = '$t = '
 		} else {
-			scope.register(t, ast.Var{
+			scope.register(ast.Var{
 				name: t
 				typ: table.string_type // is_arg: true // TODO hack so that it's not freed twice when out of scope. it's probably better to use one model
 				is_autofree_tmp: true

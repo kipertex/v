@@ -97,7 +97,7 @@ Anything you can do in other languages, you can do in V.
 </table>
 
 <!--
-There are several special keywords, which you can put after the code fences for v. 
+There are several special keywords, which you can put after the code fences for v.
 These are:
    compile      - default, you do not need to specify it. cmd/tools/check-md.v compile the example.
    ignore       - ignore the example, useful for examples that just use the syntax highlighting
@@ -297,11 +297,12 @@ In development mode the compiler will warn you that you haven't used the variabl
 In production mode (enabled by passing the `-prod` flag to v – `v -prod foo.v`)
 it will not compile at all (like in Go).
 
+<!-- this should be `failcompile`, but it compiles -->
 ```v
 fn main() {
     a := 10
     if true {
-        a := 20 // error: shadowed variable
+        a := 20 // error: redefinition of `a`
     }
     // warning: unused variable `a`
 }
@@ -309,6 +310,17 @@ fn main() {
 
 Unlike most languages, variable shadowing is not allowed. Declaring a variable with a name
 that is already used in a parent scope will cause a compilation error.
+
+You can shadow imported modules though, as it is very useful in some situations:
+```v ignore
+import ui
+import gg
+
+fn draw(ctx &gg.Context) {
+    gg := ctx.parent.get_ui().gg
+    gg.draw_rect(...)
+}
+```
 
 ## Types
 
@@ -509,6 +521,8 @@ println(nums[1]) // "2"
 nums[1] = 5
 println(nums) // "[1, 5, 3]"
 
+println(nums[0..2]) // slicing gives an array "[1, 5]"
+
 println(nums.len) // "3"
 nums = [] // The array is now empty
 println(nums.len) // "0"
@@ -588,10 +602,20 @@ Arrays can be efficiently filtered and mapped with the `.filter()` and
 nums := [1, 2, 3, 4, 5, 6]
 even := nums.filter(it % 2 == 0)
 println(even) // [2, 4, 6]
+// filter can accept anonymous functions
+even_fn := nums.filter(fn (x int) bool {
+	return x % 2 == 0
+})
+println(even_fn)
 
 words := ['hello', 'world']
 upper := words.map(it.to_upper())
 println(upper) // ['HELLO', 'WORLD']
+// map can also accept anonymous functions
+upper_fn := words.map(fn (w string) string {
+	return w.to_upper()
+})
+println(upper_fn) // ['HELLO', 'WORLD']
 ```
 
 `it` is a builtin variable which refers to element currently being processed in filter/map methods.
@@ -1012,7 +1036,7 @@ Here `i` doesn't need to be declared with `mut` since it's always going to be mu
 #### Labelled break & continue
 
 `break` and `continue` control the innermost `for` loop by default.
-You can also use `break` and `continue` followed by a label name to refer to an outer `for` 
+You can also use `break` and `continue` followed by a label name to refer to an outer `for`
 loop:
 
 ```v
@@ -1249,7 +1273,7 @@ struct ButtonConfig {
     height      int = 20
 }
 
-struct Button { 
+struct Button {
     text   string
     width  int
     height int
@@ -1738,7 +1762,7 @@ sum := World(Moon{})
 assert sum.type_name() == 'Moon'
 println(sum)
 ```
-The built-in method `type_name` returns the name of the currently held 
+The built-in method `type_name` returns the name of the currently held
 type.
 
 #### Dynamic casts
@@ -1781,7 +1805,7 @@ if w is Mars {
     }
 }
 ```
-`w` has type `Mars` inside the body of the `if` statement. This is 
+`w` has type `Mars` inside the body of the `if` statement. This is
 known as *flow-sensitive typing*. You can also specify a variable name:
 
 ```v ignore
@@ -2025,7 +2049,7 @@ At the moment only one type parameter named `T` is supported.
 
 Currently generic function definitions must declare their type parameters, but in
 future V will infer generic type parameters from single-letter type names in
-runtime parameter types. This is why `find_by_id` can omit `<T>`, because the 
+runtime parameter types. This is why `find_by_id` can omit `<T>`, because the
 receiver argument `r` uses a generic type `T`.
 
 Another example:
@@ -2187,7 +2211,7 @@ fn main () {
         // do something if no channel has become ready within 0.5s
     }
   }
-}  
+}
 ```
 
 The timeout branch is optional. If it is absent `select` waits for an unlimited amount of time.
@@ -2495,6 +2519,19 @@ fn clearall() {
 ```
 
 The comment must start with the name of the definition.
+
+Sometimes one line isn't enough to explain what a function does, in that case comments should
+span to the documented function using single line comments:
+
+```v
+// copy_all recursively copies all elements of the array by their value,
+// if `dupes` is false all duplicate values are eliminated in the process.
+fn copy_all(dupes bool) {
+	// ...
+}
+```
+
+By convention it is preferred that comments are written in *present tense*.
 
 An overview of the module must be placed in the first comment right after the module's name.
 

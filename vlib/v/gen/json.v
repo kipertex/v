@@ -139,7 +139,8 @@ $enc_fn_dec {
 }
 
 fn js_enc_name(typ string) string {
-	name := 'json__encode_$typ'
+	suffix := if typ.ends_with('*') { typ.replace('*', '') } else { typ }
+	name := 'json__encode_$suffix'
 	return util.no_dots(name)
 }
 
@@ -238,7 +239,6 @@ fn (mut g Gen) encode_map(key_type table.Type, value_type table.Type) string {
 	if key_type.is_string() {
 		key += '(($styp*)${keys_tmp}.data)[i];'
 	} else {
-		// g.gen_str_for_type(key_type)
 		// key += '${styp}_str((($styp*)${keys_tmp}.data)[i]);'
 		verror('json: encode only maps with string keys')
 	}

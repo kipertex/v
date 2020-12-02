@@ -81,11 +81,11 @@ pub fn parse_stmt(text string, table &table.Table, scope &ast.Scope) ast.Stmt {
 	return p.stmt(false)
 }
 
-pub fn parse_text(text string, b_table &table.Table, pref &pref.Preferences, scope &ast.Scope, global_scope &ast.Scope) ast.File {
+pub fn parse_comptime(text string, table &table.Table, pref &pref.Preferences, scope &ast.Scope, global_scope &ast.Scope) ast.File {
 	s := scanner.new_scanner(text, .skip_comments, pref)
 	mut p := Parser{
 		scanner: s
-		table: b_table
+		table: table
 		pref: pref
 		scope: scope
 		errors: []errors.Error{}
@@ -95,7 +95,25 @@ pub fn parse_text(text string, b_table &table.Table, pref &pref.Preferences, sco
 	return p.parse()
 }
 
-pub fn parse_file(path string, b_table &table.Table, comments_mode scanner.CommentsMode, pref &pref.Preferences, global_scope &ast.Scope) ast.File {
+pub fn parse_text(text string, table &table.Table, comments_mode scanner.CommentsMode, pref &pref.Preferences, global_scope &ast.Scope) ast.File {
+	s := scanner.new_scanner(text, comments_mode, pref)
+	mut p := Parser{
+		scanner: s
+		comments_mode: comments_mode
+		table: table
+		pref: pref
+		scope: &ast.Scope{
+			start_pos: 0
+			parent: global_scope
+		}
+		errors: []errors.Error{}
+		warnings: []errors.Warning{}
+		global_scope: global_scope
+	}
+	return p.parse()
+}
+
+pub fn parse_file(path string, table &table.Table, comments_mode scanner.CommentsMode, pref &pref.Preferences, global_scope &ast.Scope) ast.File {
 	// NB: when comments_mode == .toplevel_comments,
 	// the parser gives feedback to the scanner about toplevel statements, so that the scanner can skip
 	// all the tricky inner comments. This is needed because we do not have a good general solution
@@ -107,7 +125,7 @@ pub fn parse_file(path string, b_table &table.Table, comments_mode scanner.Comme
 	mut p := Parser{
 		scanner: scanner.new_scanner_file(path, comments_mode, pref)
 		comments_mode: comments_mode
-		table: b_table
+		table: table
 		file_name: path
 		file_base: os.base(path)
 		file_name_dir: os.dir(path)
@@ -1037,8 +1055,13 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 		}
 	}
 	// Raw string (`s := r'hello \n ')
-	if p.tok.lit in ['r', 'c', 'js'] && p.peek_tok.kind == .string && !p.inside_str_interp {
-		return p.string_expr()
+	if p.peek_tok.kind == .string && !p.inside_str_interp && p.peek_tok2.kind != .colon {
+		if p.tok.lit in ['r', 'c', 'js'] && p.tok.kind == .name {
+			return p.string_expr()
+		} else {
+			// don't allow any other string prefix except `r`, `js` and `c`
+			p.error('only `c`, `r`, `js` are recognized string prefixes, but you tried to use `$p.tok.lit`')
+		}
 	}
 	// don't allow r`byte` and c`byte`
 	if p.tok.lit in ['r', 'c'] && p.peek_tok.kind == .chartoken {
@@ -1253,7 +1276,7 @@ fn (mut p Parser) index_expr(left ast.Expr) ast.IndexExpr {
 }
 
 fn (mut p Parser) scope_register_it() {
-	p.scope.register('it', ast.Var{
+	p.scope.register(ast.Var{
 		name: 'it'
 		pos: p.tok.position()
 		is_used: true
@@ -1261,12 +1284,12 @@ fn (mut p Parser) scope_register_it() {
 }
 
 fn (mut p Parser) scope_register_ab() {
-	p.scope.register('a', ast.Var{
+	p.scope.register(ast.Var{
 		name: 'a'
 		pos: p.tok.position()
 		is_used: true
 	})
-	p.scope.register('b', ast.Var{
+	p.scope.register(ast.Var{
 		name: 'b'
 		pos: p.tok.position()
 		is_used: true
@@ -1305,13 +1328,13 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		if p.tok.kind == .key_orelse {
 			p.next()
 			p.open_scope()
-			p.scope.register('errcode', ast.Var{
+			p.scope.register(ast.Var{
 				name: 'errcode'
 				typ: table.int_type
 				pos: p.tok.position()
 				is_used: true
 			})
-			p.scope.register('err', ast.Var{
+			p.scope.register(ast.Var{
 				name: 'err'
 				typ: table.string_type
 				pos: p.tok.position()
@@ -1367,6 +1390,7 @@ fn (mut p Parser) dot_expr(left ast.Expr) ast.Expr {
 		field_name: field_name
 		pos: name_pos
 		is_mut: is_mut
+		mut_pos: mut_pos
 	}
 	mut node := ast.Expr{}
 	node = sel_expr
@@ -1596,11 +1620,11 @@ fn (mut p Parser) import_stmt() ast.Import {
 	}
 	if p.tok.kind == .lcbr { // import module { fn1, Type2 } syntax
 		p.import_syms(mut node)
-		p.register_used_import(mod_name) // no `unused import` msg for parent
+		p.register_used_import(mod_alias) // no `unused import` msg for parent
 	}
 	pos_t := p.tok.position()
 	if import_pos.line_nr == pos_t.line_nr {
-		if p.tok.kind !in [.lcbr, .eof] {
+		if p.tok.kind !in [.lcbr, .eof, .comment] {
 			p.error_with_pos('cannot import multiple modules at a time', pos_t)
 		}
 	}
@@ -1722,7 +1746,7 @@ fn (mut p Parser) const_decl() ast.ConstDecl {
 			comments: comments
 		}
 		fields << field
-		p.global_scope.register(field.name, field)
+		p.global_scope.register(field)
 		comments = []
 	}
 	p.top_level_statement_end()
@@ -1811,7 +1835,7 @@ fn (mut p Parser) global_decl() ast.GlobalDecl {
 			comments: comments
 		}
 		fields << field
-		p.global_scope.register(field.name, field)
+		p.global_scope.register(field)
 		comments = []
 	}
 	p.check(.rpar)
