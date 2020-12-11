@@ -36,6 +36,7 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 		p.next() // .
 	}
 	name_pos := p.tok.position()
+	p.check_for_impure_v(language, name_pos)
 	mut name := p.check_name()
 	// defer {
 	// if name.contains('App') {
@@ -193,6 +194,10 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 					}
 				}
 				typ = p.parse_type()
+				if typ.idx() == 0 {
+					// error is set in parse_type
+					return ast.StructDecl{}
+				}
 				type_pos = p.prev_tok.position()
 				field_pos = field_start_pos.extend(type_pos)
 			}
@@ -272,15 +277,10 @@ fn (mut p Parser) struct_decl() ast.StructDecl {
 		is_public: is_pub
 	}
 	mut ret := 0
-	if p.builtin_mod && t.name in table.builtin_type_names {
-		// this allows overiding the builtins type
-		// with the real struct type info parsed from builtin
-		ret = p.table.register_builtin_type_symbol(t)
-	} else {
-		// println('reg type symbol $name mod=$p.mod')
-		ret = p.table.register_type_symbol(t)
-	}
-	if ret == -1 {
+	// println('reg type symbol $name mod=$p.mod')
+	ret = p.table.register_type_symbol(t)
+	// allow duplicate c struct declarations
+	if ret == -1 && language != .c {
 		p.error_with_pos('cannot register struct `$name`, another type with this name exists',
 			name_pos)
 		return ast.StructDecl{}
@@ -318,22 +318,23 @@ fn (mut p Parser) struct_init(short_syntax bool) ast.StructInit {
 	// p.warn(is_short_syntax.str())
 	saved_is_amp := p.is_amp
 	p.is_amp = false
-	for p.tok.kind != .rcbr && p.tok.kind != .rpar {
+	for p.tok.kind !in [.rcbr, .rpar, .eof] {
 		mut field_name := ''
 		mut expr := ast.Expr{}
 		mut field_pos := token.Position{}
 		mut comments := []ast.Comment{}
+		mut nline_comments := []ast.Comment{}
 		if no_keys {
 			// name will be set later in checker
 			expr = p.expr(0)
 			field_pos = expr.position()
-			comments = p.eat_comments()
+			comments = p.eat_line_end_comments()
 		} else {
 			first_field_pos := p.tok.position()
 			field_name = p.check_name()
 			p.check(.colon)
 			expr = p.expr(0)
-			comments = p.eat_comments()
+			comments = p.eat_line_end_comments()
 			last_field_pos := expr.position()
 			field_pos = token.Position{
 				line_nr: first_field_pos.line_nr
@@ -345,12 +346,14 @@ fn (mut p Parser) struct_init(short_syntax bool) ast.StructInit {
 		if p.tok.kind == .comma {
 			p.next()
 		}
-		comments << p.eat_comments()
+		comments << p.eat_line_end_comments()
+		nline_comments << p.eat_comments()
 		fields << ast.StructInitField{
 			name: field_name
 			expr: expr
 			pos: field_pos
 			comments: comments
+			next_comments: nline_comments
 		}
 	}
 	last_pos := p.tok.position()
@@ -387,6 +390,7 @@ fn (mut p Parser) interface_decl() ast.InterfaceDecl {
 	pre_comments := p.eat_comments()
 	// Declare the type
 	reg_idx := p.table.register_type_symbol(
+		is_public: is_pub
 		kind: .interface_
 		name: interface_name
 		cname: util.no_dots(interface_name)

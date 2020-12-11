@@ -701,17 +701,24 @@ fn (mut c Builder) cc_windows_cross() {
 	if !c.pref.out_name.ends_with('.exe') {
 		c.pref.out_name += '.exe'
 	}
-	mut args := '-o $c.pref.out_name -w -L. '
+	mut args := ''
+	args += ' $c.pref.cflags '
+	args += ' -o $c.pref.out_name -w -L. '
+	//
 	cflags := c.get_os_cflags()
 	// -I flags
 	args += if c.pref.ccompiler == 'msvc' { cflags.c_options_before_target_msvc() } else { cflags.c_options_before_target() }
 	mut optimization_options := ''
 	mut debug_options := ''
 	if c.pref.is_prod {
-		optimization_options = if c.pref.ccompiler == 'msvc' { '' } else { ' -O3 -fno-strict-aliasing -flto ' }
+		if c.pref.ccompiler != 'msvc' {
+			optimization_options = ' -O3 -fno-strict-aliasing -flto '
+		}
 	}
 	if c.pref.is_debug {
-		debug_options = if c.pref.ccompiler == 'msvc' { '' } else { ' -g3 -no-pie ' }
+		if c.pref.ccompiler != 'msvc' {
+			debug_options = ' -O0 -g -gdwarf-2 '
+		}
 	}
 	mut libs := ''
 	if false && c.pref.build_mode == .default_mode {
@@ -723,6 +730,8 @@ fn (mut c Builder) cc_windows_cross() {
 			libs += ' "$pref.default_module_path/vlib/${imp}.o"'
 		}
 	}
+	// add the thirdparty .o files, produced by all the #flag directives:
+	args += ' ' + cflags.c_options_only_object_files() + ' '
 	args += ' $c.out_name_c '
 	args += if c.pref.ccompiler == 'msvc' { cflags.c_options_after_target_msvc() } else { cflags.c_options_after_target() }
 	/*

@@ -1273,6 +1273,9 @@ pub fn (mut f Fmt) short_module(name string) string {
 	if !name.contains('.') {
 		return name
 	}
+	if name in f.mod2alias {
+		return f.mod2alias[name]
+	}
 	if name.ends_with('>') {
 		x := name.trim_suffix('>').split('<')
 		if x.len == 2 {
@@ -1692,7 +1695,7 @@ pub fn (mut f Fmt) array_init(it ast.ArrayInit) {
 			f.write('}')
 			return
 		}
-		f.write(f.table.type_to_str(it.typ))
+		f.write(f.table.type_to_str_using_aliases(it.typ, f.mod2alias))
 		f.write('{')
 		// TODO copypasta
 		if it.has_len {
@@ -1826,8 +1829,14 @@ pub fn (mut f Fmt) struct_init(it ast.StructInit) {
 		name = ''
 	}
 	if it.fields.len == 0 {
-		// `Foo{}` on one line if there are no fields
-		f.write('$name{}')
+		// `Foo{}` on one line if there are no fields or comments
+		if it.pre_comments.len == 0 {
+			f.write('$name{}')
+		} else {
+			f.writeln('$name{')
+			f.comments(it.pre_comments, inline: true, has_nl: true, level: .indent)
+			f.write('}')
+		}
 	} else if it.is_short {
 		// `Foo{1,2,3}` (short syntax )
 		// if name != '' {
@@ -1863,6 +1872,7 @@ pub fn (mut f Fmt) struct_init(it ast.StructInit) {
 			} else {
 				f.writeln('')
 			}
+			f.comments(field.next_comments, inline: false, has_nl: true, level: .keep)
 		}
 		f.indent--
 		if !use_short_args {

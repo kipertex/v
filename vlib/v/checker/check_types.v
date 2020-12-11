@@ -89,23 +89,11 @@ pub fn (mut c Checker) check_basic(got table.Type, expected table.Type) bool {
 	if got_idx == table.array_type_idx || exp_idx == table.array_type_idx {
 		return true
 	}
-	if got_type_sym.kind == .array && exp_type_sym.kind == .array {
-		// TODO
-		// accept [] when an expected type is an array
-		if got_type_sym.name == 'array_void' {
-			return true
-		}
-		// if elem_type is an alias, check it
-		// TODO: think about recursion, how many levels of alias can there be?
-		got_info := got_type_sym.info as table.Array
-		exp_info := exp_type_sym.info as table.Array
-		got_elem_sym := c.table.get_type_symbol(got_info.elem_type)
-		exp_elem_sym := c.table.get_type_symbol(exp_info.elem_type)
-		if (got_elem_sym.kind == .alias ||
-			exp_elem_sym.kind == .alias) &&
-			c.check_basic(got_info.elem_type, exp_info.elem_type) {
-			return true
-		}
+	// TODO
+	// accept [] when an expected type is an array
+	if got_type_sym.kind == .array &&
+		exp_type_sym.kind == .array && got_type_sym.name == 'array_void' {
+		return true
 	}
 	// type alias
 	if (got_type_sym.kind == .alias &&
@@ -114,7 +102,7 @@ pub fn (mut c Checker) check_basic(got table.Type, expected table.Type) bool {
 		return true
 	}
 	// sum type
-	if c.check_sumtype_compatibility(got, expected) {
+	if c.table.sumtype_has_variant(expected, got) {
 		return true
 	}
 	// fn type
@@ -396,10 +384,6 @@ pub fn (mut c Checker) string_inter_lit(mut node ast.StringInterLiteral) table.T
 		}
 	}
 	return table.string_type
-}
-
-pub fn (c &Checker) check_sumtype_compatibility(a table.Type, b table.Type) bool {
-	return c.table.sumtype_has_variant(a, b) || c.table.sumtype_has_variant(b, a)
 }
 
 pub fn (mut c Checker) infer_fn_types(f table.Fn, mut call_expr ast.CallExpr) {

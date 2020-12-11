@@ -3,6 +3,7 @@ module js
 import strings
 import v.ast
 import v.table
+import v.token
 import v.pref
 import v.util
 import v.depgraph
@@ -13,48 +14,59 @@ const (
 		'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'finally', 'for', 'function', 'if',
 		'implements', 'import', 'in', 'instanceof', 'interface', 'let', 'new', 'package', 'private', 'protected',
 		'public', 'return', 'static', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void',
-		'while', 'with', 'yield']
+		'while', 'with', 'yield', 'Number', 'String', 'Boolean', 'Array', 'Map']
+	// used to generate type structs
+	v_types = ['i8', 'i16', 'int', 'i64', 'byte', 'u16', 'u32', 'u64', 'f32', 'f64', 'any_int', 'any_float', 'size_t', 'bool', 'string', 'map', 'array']
 	tabs        = ['', '\t', '\t\t', '\t\t\t', '\t\t\t\t', '\t\t\t\t\t', '\t\t\t\t\t\t', '\t\t\t\t\t\t\t',
 		'\t\t\t\t\t\t\t\t', '\t\t\t\t\t\t\t\t\t', '\t\t\t\t\t\t\t\t\t', '\t\t\t\t\t\t\t\t\t']
 )
+
+struct Namespace {
+	name     string
+mut:
+	out      strings.Builder = strings.new_builder(128)
+	pub_vars []string
+	imports  map[string]string
+	indent   int
+	methods  map[string][]ast.FnDecl
+}
 
 struct JsGen {
 	table             &table.Table
 	pref              &pref.Preferences
 mut:
-	definitions       strings.Builder
-	out               strings.Builder
-	namespaces        map[string]strings.Builder
-	namespaces_pub    map[string][]string
-	namespace_imports map[string]map[string]string
-	namespace         string
-	doc               &JsDoc
-	enable_doc        bool
-	file              ast.File
-	tmp_count         int
-	inside_ternary    bool
-	inside_loop       bool
-	inside_map_set    bool // map.set(key, value)
-	is_test           bool
-	indents           map[string]int // indentations mapped to namespaces
-	stmt_start_pos    int
-	defer_stmts       []ast.DeferStmt
-	fn_decl           &ast.FnDecl // pointer to the FnDecl we are currently inside otherwise 0
-	str_types         []string // types that need automatic str() generation
-	method_fn_decls   map[string][]ast.FnDecl
-	builtin_fns       []string // Functions defined in `builtin`
-	empty_line        bool
+	definitions       	strings.Builder
+	ns                	&Namespace
+	namespaces        	map[string]&Namespace
+	doc               	&JsDoc
+	enable_doc        	bool
+	file              	ast.File
+	tmp_count         	int
+	inside_ternary    	bool
+	inside_loop       	bool
+	inside_map_set    	bool // map.set(key, value)
+	inside_builtin    	bool
+	generated_builtin 	bool
+	inside_def_typ_decl bool
+	is_test           	bool
+	stmt_start_pos    	int
+	defer_stmts       	[]ast.DeferStmt
+	fn_decl           	&ast.FnDecl // pointer to the FnDecl we are currently inside otherwise 0
+	str_types         	[]string // types that need automatic str() generation
+	method_fn_decls   	map[string][]ast.FnDecl
+	builtin_fns       	[]string // Functions defined in `builtin`
+	empty_line        	bool
 }
 
 pub fn gen(files []ast.File, table &table.Table, pref &pref.Preferences) string {
 	mut g := &JsGen{
-		out: strings.new_builder(100)
 		definitions: strings.new_builder(100)
 		table: table
 		pref: pref
 		fn_decl: 0
 		empty_line: true
 		doc: 0
+		ns: 0
 		enable_doc: true
 	}
 	g.doc = new_jsdoc(g)
@@ -82,6 +94,11 @@ pub fn gen(files []ast.File, table &table.Table, pref &pref.Preferences) string 
 			imports << imp.mod
 		}
 		graph.add(g.file.mod.name, imports)
+		// builtin types
+		if g.file.mod.name == 'builtin' && !g.generated_builtin {
+			g.gen_builtin_type_defs()
+			g.generated_builtin = true
+		}
 		g.stmts(file.stmts)
 		// store the current namespace
 		g.escape_namespace()
@@ -96,7 +113,7 @@ pub fn gen(files []ast.File, table &table.Table, pref &pref.Preferences) string 
 			out += '/** @namespace $name */\n'
 		}
 		out += 'const $name = (function ('
-		imports := g.namespace_imports[node.name]
+		imports := g.namespaces[node.name].imports
 		for i, key in imports.keys() {
 			if i > 0 {
 				out += ', '
@@ -105,20 +122,26 @@ pub fn gen(files []ast.File, table &table.Table, pref &pref.Preferences) string 
 		}
 		out += ') {\n\t'
 		// private scope
-		out += g.namespaces[node.name].str().trim_space()
+		out += g.namespaces[node.name].out.str().trim_space()
 		// public scope
 		out += '\n'
 		if g.enable_doc {
 			out += '\n\t/* module exports */'
 		}
 		out += '\n\treturn {'
-		for i, pub_var in g.namespaces_pub[node.name] {
+		// export builtin types
+		if name == 'builtin' {
+			for typ in v_types {
+				out += '\n\t\t$typ,'
+			}
+		}
+		for i, pub_var in g.namespaces[node.name].pub_vars {
 			out += '\n\t\t$pub_var'
-			if i < g.namespaces_pub[node.name].len - 1 {
+			if i < g.namespaces[node.name].pub_vars.len - 1 {
 				out += ','
 			}
 		}
-		if g.namespaces_pub[node.name].len > 0 {
+		if g.namespaces[node.name].pub_vars.len > 0 {
 			out += '\n\t'
 		}
 		out += '};'
@@ -129,36 +152,53 @@ pub fn gen(files []ast.File, table &table.Table, pref &pref.Preferences) string 
 			}
 			out += key.replace('.', '_')
 		}
-		out += ');\n\n'
+		out += ');\n'
+		// generate builtin basic type casts
+		if name == 'builtin' {
+			out += '// builtin type casts\n'
+			out += 'const ['
+			for i, typ in v_types {
+				if i > 0 { out += ', ' }
+				out += '$typ'
+			}
+			out += '] = ['
+			for i, typ in v_types {
+				if i > 0 { out += ',' }
+				out += '\n\tfunction(val) { return new builtin.${typ}(val) }'
+			}
+			out += '\n]\n'
+		}
 	}
 	if pref.is_shared {
 		// Export, through CommonJS, the module of the entry file if `-shared` was passed
 		export := nodes[nodes.len - 1].name
-		out += 'if (typeof module === "object" && module.exports) module.exports = $export;'
+		out += 'if (typeof module === "object" && module.exports) module.exports = $export;\n'
 	}
+	out += '\n'
 	return out
 }
 
-pub fn (mut g JsGen) enter_namespace(n string) {
-	g.namespace = n
-	if g.namespaces[g.namespace].len == 0 {
+pub fn (mut g JsGen) enter_namespace(name string) {
+	if g.namespaces[name] == 0 {
 		// create a new namespace
-		g.out = strings.new_builder(100)
-		g.indents[g.namespace] = 0
+		ns := &Namespace{
+			name: name
+		}
+		g.namespaces[name] = ns
+		g.ns = ns
 	} else {
-		g.out = g.namespaces[g.namespace]
+		g.ns = g.namespaces[name]
 	}
+	g.inside_builtin = name == 'builtin'
 }
 
 pub fn (mut g JsGen) escape_namespace() {
-	g.namespaces[g.namespace] = g.out
-	g.namespace = ''
+	g.ns = 0
+	g.inside_builtin = false
 }
 
 pub fn (mut g JsGen) push_pub_var(s string) {
-	mut arr := g.namespaces_pub[g.namespace]
-	arr << g.js_name(s)
-	g.namespaces_pub[g.namespace] = arr
+	g.ns.pub_vars << g.js_name(s)
 }
 
 pub fn (mut g JsGen) find_class_methods(stmts []ast.Stmt) {
@@ -167,7 +207,7 @@ pub fn (mut g JsGen) find_class_methods(stmts []ast.Stmt) {
 			ast.FnDecl {
 				if stmt.is_method {
 					// Found struct method, store it to be generated along with the class.
-					class_name := g.table.get_type_name(stmt.receiver.typ)
+					mut class_name := g.table.get_type_name(stmt.receiver.typ)
 					// Workaround until `map[key] << val` works.
 					mut arr := g.method_fn_decls[class_name]
 					arr << stmt
@@ -191,197 +231,46 @@ pub fn (g JsGen) hashes() string {
 	return res
 }
 
-// V type to JS type
-pub fn (mut g JsGen) typ(t table.Type) string {
-	sym := g.table.get_type_symbol(t)
-	mut styp := ''
-	match sym.kind {
-		.placeholder {
-			// This should never happen: means checker bug
-			styp = 'any'
-		}
-		.void {
-			styp = 'void'
-		}
-		.voidptr {
-			styp = 'any'
-		}
-		.byteptr, .charptr {
-			styp = 'string'
-		}
-		.i8, .i16, .int, .i64, .byte, .u16, .u32, .u64, .f32, .f64, .any_int, .any_float, .size_t {
-			// TODO: Should u64 and i64 use BigInt rather than number?
-			styp = 'number'
-		}
-		.bool {
-			styp = 'boolean'
-		}
-		.none_ {
-			styp = 'undefined'
-		}
-		.string, .ustring, .char {
-			styp = 'string'
-		}
-		// 'array_array_int' => 'number[][]'
-		.array {
-			info := sym.info as table.Array
-			styp = g.typ(info.elem_type) + '[]'
-		}
-		.array_fixed {
-			info := sym.info as table.ArrayFixed
-			styp = g.typ(info.elem_type) + '[]'
-		}
-		.chan {
-			styp = 'chan'
-		}
-		// 'map[string]int' => 'Map<string, number>'
-		.map {
-			info := sym.info as table.Map
-			key := g.typ(info.key_type)
-			val := g.typ(info.value_type)
-			styp = 'Map<$key, $val>'
-		}
-		.any {
-			styp = 'any'
-		}
-		// ns.Foo => alias["Foo"]["prototype"]
-		.struct_ {
-			styp = g.struct_typ(sym.name)
-		}
-		.generic_struct_inst {}
-		// 'multi_return_int_int' => '[number, number]'
-		.multi_return {
-			info := sym.info as table.MultiReturn
-			types := info.types.map(g.typ(it))
-			joined := types.join(', ')
-			styp = '[$joined]'
-		}
-		.sum_type {
-			// TODO: Implement sumtypes
-			styp = 'union_sym_type'
-		}
-		.alias {
-			// TODO: Implement aliases
-			styp = 'alias'
-		}
-		.enum_ {
-			// NB: We could declare them as TypeScript enums but TS doesn't like
-			// our namespacing so these break if declared in a different module.
-			// Until this is fixed, We need to use the type of an enum's members
-			// rather than the enum itself, and this can only be 'number' for now
-			styp = 'number'
-		}
-		// 'anon_fn_7_7_1' => '(a number, b number) => void'
-		.function {
-			info := sym.info as table.FnType
-			styp = g.fn_typ(info.func.params, info.func.return_type)
-		}
-		.interface_ {
-			styp = g.js_name(sym.name)
-		}
-		.rune {
-			styp = 'any'
-		}
-		.aggregate {
-			panic('TODO: unhandled aggregate in JS')
-		}
-	}
-	/*
-	else {
-			println('jsgen.typ: Unhandled type $t')
-			styp = sym.name
-		}
-	*/
-	if styp.starts_with('JS.') {
-		return styp[3..]
-	}
-	return styp
+[inline]
+fn verror(msg string) {
+	eprintln('jsgen error: $msg')
+	exit(1)
 }
 
-fn (mut g JsGen) fn_typ(args []table.Param, return_type table.Type) string {
-	mut res := '('
-	for i, arg in args {
-		res += '$arg.name: ${g.typ(arg.typ)}'
-		if i < args.len - 1 {
-			res += ', '
-		}
-	}
-	return res + ') => ' + g.typ(return_type)
-}
-
-fn (mut g JsGen) struct_typ(s string) string {
-	ns := get_ns(s)
-	mut name := if ns == g.namespace { s.split('.').last() } else { g.get_alias(s) }
-	mut styp := ''
-	for i, v in name.split('.') {
-		if i == 0 {
-			styp = v
-		} else {
-			styp += '["$v"]'
-		}
-	}
-	if ns in ['', g.namespace] {
-		return styp
-	}
-	return styp + '["prototype"]'
-}
-
-fn (mut g JsGen) to_js_typ_val(t table.Type) string {
-	sym := g.table.get_type_symbol(t)
-	mut styp := ''
-	match sym.kind {
-		.i8, .i16, .int, .i64, .byte, .u16, .u32, .u64, .f32, .f64, .any_int, .any_float, .size_t {
-			styp = '0'
-		}
-		.bool {
-			styp = 'false'
-		}
-		.string {
-			styp = '""'
-		}
-		.map {
-			styp = 'new Map()'
-		}
-		.array {
-			styp = '[]'
-		}
-		.struct_ {
-			styp = 'new ${g.js_name(sym.name)}({})'
-		}
-		else {
-			// TODO
-			styp = 'undefined'
-		}
-	}
-	return styp
-}
-
+[inline]
 pub fn (mut g JsGen) gen_indent() {
-	if g.indents[g.namespace] > 0 && g.empty_line {
-		g.out.write(tabs[g.indents[g.namespace]])
+	if g.ns.indent > 0 && g.empty_line {
+		g.ns.out.write(tabs[g.ns.indent])
 	}
 	g.empty_line = false
 }
 
+[inline]
 pub fn (mut g JsGen) inc_indent() {
-	g.indents[g.namespace]++
+	g.ns.indent++
 }
 
+[inline]
 pub fn (mut g JsGen) dec_indent() {
-	g.indents[g.namespace]--
+	g.ns.indent--
 }
 
+[inline]
 pub fn (mut g JsGen) write(s string) {
+	if g.ns == 0 { verror('g.write: not in a namespace') }
 	g.gen_indent()
-	g.out.write(s)
+	g.ns.out.write(s)
 }
 
+[inline]
 pub fn (mut g JsGen) writeln(s string) {
+	if g.ns == 0 { verror('g.writeln: not in a namespace') }
 	g.gen_indent()
-	g.out.writeln(s)
+	g.ns.out.writeln(s)
 	g.empty_line = true
 }
 
+[inline]
 pub fn (mut g JsGen) new_tmp_var() string {
 	g.tmp_count++
 	return '_tmp$g.tmp_count'
@@ -391,9 +280,7 @@ pub fn (mut g JsGen) new_tmp_var() string {
 // 'fn' => ''
 [inline]
 fn get_ns(s string) string {
-	idx := s.last_index('.') or {
-		return ''
-	}
+	idx := s.last_index('.') or { return '' }
 	return s.substr(0, idx)
 }
 
@@ -402,8 +289,7 @@ fn (mut g JsGen) get_alias(name string) string {
 	if ns == '' {
 		return name
 	}
-	imports := g.namespace_imports[g.namespace]
-	alias := imports[ns]
+	alias := g.ns.imports[ns]
 	if alias == '' {
 		return name
 	}
@@ -418,7 +304,7 @@ fn (mut g JsGen) js_name(name_ string) string {
 		is_js = true
 	}
 	ns := get_ns(name)
-	name = if ns == g.namespace { name.split('.').last() } else { g.get_alias(name) }
+	name = if g.ns == 0 { name } else if ns == g.ns.name { name.split('.').last() } else { g.get_alias(name) }
 	mut parts := name.split('.')
 	if !is_js {
 		for i, p in parts {
@@ -439,7 +325,7 @@ fn (mut g JsGen) stmts(stmts []ast.Stmt) {
 }
 
 fn (mut g JsGen) stmt(node ast.Stmt) {
-	g.stmt_start_pos = g.out.len
+	g.stmt_start_pos = g.ns.out.len
 	match node {
 		ast.AssertStmt {
 			g.gen_assert_stmt(node)
@@ -501,7 +387,7 @@ fn (mut g JsGen) stmt(node ast.Stmt) {
 			g.gen_hash_stmt(node)
 		}
 		ast.Import {
-			g.gen_import_stmt(node)
+			g.ns.imports[node.mod] = node.alias
 		}
 		ast.InterfaceDecl {
 			g.gen_interface_decl(node)
@@ -557,9 +443,7 @@ fn (mut g JsGen) expr(node ast.Expr) {
 			// TODO
 		}
 		ast.CastExpr {
-			// JS has no types, so no need to cast
-			// Just write the expression inside
-			g.expr(node.expr)
+			g.gen_type_cast_expr(node)
 		}
 		ast.CharLiteral {
 			g.write("'$node.val'")
@@ -574,7 +458,7 @@ fn (mut g JsGen) expr(node ast.Expr) {
 			g.write('${styp}.$node.val')
 		}
 		ast.FloatLiteral {
-			g.write(node.val)
+			g.write('${g.typ(table.Type(table.f32_type))}($node.val)')
 		}
 		ast.Ident {
 			g.gen_ident(node)
@@ -592,7 +476,7 @@ fn (mut g JsGen) expr(node ast.Expr) {
 			g.gen_infix_expr(node)
 		}
 		ast.IntegerLiteral {
-			g.write(node.val)
+			g.write('${g.typ(table.Type(table.int_type))}($node.val)')
 		}
 		ast.LockExpr {
 			g.gen_lock_expr(node)
@@ -645,8 +529,9 @@ fn (mut g JsGen) expr(node ast.Expr) {
 			g.gen_string_inter_literal(node)
 		}
 		ast.StringLiteral {
-			text := node.val.replace('`', '\\`')
-			g.write('`$text`')
+			text := node.val.replace('\'', "\\'")
+			if g.file.mod.name == 'builtin' { g.write('new ') }
+			g.write("string('$text')")
 		}
 		ast.StructInit {
 			// `user := User{name: 'Bob'}`
@@ -840,7 +725,7 @@ fn (mut g JsGen) gen_fn_decl(it ast.FnDecl) {
 		// Struct methods are handled by class generation code.
 		return
 	}
-	if g.namespace == 'builtin' {
+	if g.inside_builtin {
 		g.builtin_fns << it.name
 	}
 	g.gen_method_decl(it)
@@ -885,6 +770,12 @@ fn (mut g JsGen) gen_method_decl(it ast.FnDecl) {
 		}
 		if !it.is_method {
 			g.write('function ')
+		} else {
+			if it.attrs.contains('js_getter') {
+				g.write('get ')
+			} else if it.attrs.contains('js_setter') {
+				g.write('set ')
+			}
 		}
 		g.write('${name}(')
 		if it.is_pub && !it.is_method {
@@ -1041,9 +932,7 @@ fn (mut g JsGen) gen_go_stmt(node ast.GoStmt) {
 }
 
 fn (mut g JsGen) gen_import_stmt(it ast.Import) {
-	mut imports := g.namespace_imports[g.namespace]
-	imports[it.mod] = it.alias
-	g.namespace_imports[g.namespace] = imports
+	g.ns.imports[it.mod] = it.alias
 }
 
 fn (mut g JsGen) gen_interface_decl(it ast.InterfaceDecl) {
@@ -1076,12 +965,17 @@ fn (mut g JsGen) gen_hash_stmt(it ast.HashStmt) {
 }
 
 fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
-	if node.name.starts_with('JS.') {
+	mut name := node.name
+	if name.starts_with('JS.') {
 		return
 	}
+	if name in v_types && g.ns.name == 'builtin' {
+		return
+	}
+	js_name := g.js_name(name)
 	g.gen_attrs(node.attrs)
 	g.doc.gen_fac_fn(node.fields)
-	g.write('function ${g.js_name(node.name)}({ ')
+	g.write('function ${js_name}({ ')
 	for i, field in node.fields {
 		g.write('$field.name = ')
 		if field.has_default_expr {
@@ -1100,31 +994,41 @@ fn (mut g JsGen) gen_struct_decl(node ast.StructDecl) {
 	}
 	g.dec_indent()
 	g.writeln('};')
-	g.writeln('${g.js_name(node.name)}.prototype = {')
+	g.writeln('${js_name}.prototype = {')
 	g.inc_indent()
-	fns := g.method_fn_decls[node.name]
-	for i, field in node.fields {
+	fns := g.method_fn_decls[name]
+	for field in node.fields {
 		typ := g.typ(field.typ)
 		g.doc.gen_typ(typ)
 		g.write('$field.name: ${g.to_js_typ_val(field.typ)}')
-		if i < node.fields.len - 1 || fns.len > 0 {
-			g.writeln(',')
-		} else {
-			g.writeln('')
-		}
+		g.writeln(',')
 	}
-	for i, cfn in fns {
+	for cfn in fns {
 		g.gen_method_decl(cfn)
-		if i < fns.len - 1 {
-			g.writeln(',')
-		} else {
-			g.writeln('')
-		}
+		g.writeln(',')
 	}
+	// gen toString method
+	fn_names := fns.map(it.name)
+	if !('toString' in fn_names) {
+		g.writeln('toString() {')
+		g.inc_indent()
+		g.write('return `${js_name} {')
+		for i, field in node.fields {
+			g.write(if i == 0 { ' ' } else { ', ' })
+			match g.typ(field.typ).split('.').last() {
+				"string" { g.write('$field.name: "\${this["${field.name}"].toString()}"') }
+				else { g.write('$field.name: \${this["${field.name}"].toString()} ') }
+			}
+		}
+		g.writeln('}`')
+		g.dec_indent()
+		g.writeln('}')
+	}
+
 	g.dec_indent()
 	g.writeln('};\n')
 	if node.is_pub {
-		g.push_pub_var(node.name)
+		g.push_pub_var(name)
 	}
 }
 
@@ -1279,6 +1183,7 @@ fn (mut g JsGen) gen_ident(node ast.Ident) {
 	// TODO `is`
 	// TODO handle optionals
 	g.write(name)
+	// TODO: Generate .val for basic types
 }
 
 fn (mut g JsGen) gen_lock_expr(node ast.LockExpr) {
@@ -1375,6 +1280,7 @@ fn (mut g JsGen) gen_index_expr(expr ast.IndexExpr) {
 			g.write('.get(')
 		}
 		g.expr(expr.index)
+		g.write('.toString()')
 		if !expr.is_setter {
 			g.write(')')
 		}
@@ -1384,7 +1290,7 @@ fn (mut g JsGen) gen_index_expr(expr ast.IndexExpr) {
 			// 'string'[3] = `o`
 		} else {
 			g.expr(expr.left)
-			g.write('.charCodeAt(')
+			g.write('.str.charCodeAt(')
 			g.expr(expr.index)
 			g.write(')')
 		}
@@ -1416,10 +1322,15 @@ fn (mut g JsGen) gen_infix_expr(it ast.InfixExpr) {
 		g.expr(it.right)
 		g.write(if r_sym.kind == .map {
 			'.has('
+		} else if r_sym.kind == .string {
+			'.str.includes('
 		} else {
 			'.includes('
 		})
 		g.expr(it.left)
+		if l_sym.kind == .string {
+			g.write('.str')
+		}
 		g.write(')')
 		if it.op == .not_in {
 			g.write(')')
@@ -1437,8 +1348,12 @@ fn (mut g JsGen) gen_infix_expr(it ast.InfixExpr) {
 	} else {
 		both_are_int := int(it.left_type) in table.integer_type_idxs &&
 			int(it.right_type) in table.integer_type_idxs
+		is_arithmetic := it.op in [token.Kind.plus, .minus, .mul, .div, .mod]
+		if is_arithmetic {
+			g.write('${g.typ(g.greater_typ(it.left_type, it.right_type))}(')
+		}
 		if it.op == .div && both_are_int {
-			g.write('parseInt(')
+			g.write('((')
 		}
 		g.expr(it.left)
 		// in js == is non-strict & === is strict, always do strict
@@ -1450,11 +1365,45 @@ fn (mut g JsGen) gen_infix_expr(it ast.InfixExpr) {
 			g.write(' $it.op ')
 		}
 		g.expr(it.right)
-		// Int division: 2.5 -> 2 by prepending |0
+		// Int division: 2.5 -> 2 by appending |0
 		if it.op == .div && both_are_int {
-			g.write(',10)')
+			g.write(')|0)')
+		}
+		if is_arithmetic {
+			g.write(')')
 		}
 	}
+}
+
+fn (mut g JsGen) greater_typ(left table.Type, right table.Type) table.Type {
+	l := int(left)
+	r := int(right)
+	lr := [l,r]
+
+	if table.string_type_idx in lr { return table.Type(table.string_type_idx) }
+
+	should_float := (l in table.integer_type_idxs && r in table.float_type_idxs) || (r in table.integer_type_idxs && l in table.float_type_idxs)
+	if should_float {
+		if table.f64_type_idx in lr { return table.Type(table.f64_type_idx) }
+		if table.f32_type_idx in lr { return table.Type(table.f32_type_idx) }
+		return table.Type(table.any_flt_type)
+	}
+
+	should_int := (l in table.integer_type_idxs && r in table.integer_type_idxs)
+	if should_int {
+		// cant add to u64 - if (table.u64_type_idx in lr) { return table.Type(table.u64_type_idx) }
+		// just guessing this order
+		if table.i64_type_idx in lr { return table.Type(table.i64_type_idx) }
+		if table.u32_type_idx in lr { return table.Type(table.u32_type_idx) }
+		if table.int_type_idx in lr { return table.Type(table.int_type_idx) }
+		if table.u16_type_idx in lr { return table.Type(table.u16_type_idx) }
+		if table.i16_type_idx in lr { return table.Type(table.i16_type_idx) }
+		if table.byte_type_idx in lr { return table.Type(table.byte_type_idx) }
+		if table.i8_type_idx in lr { return table.Type(table.i8_type_idx) }
+		return table.Type(table.any_int_type_idx)
+	}
+
+	return table.Type(l)
 }
 
 fn (mut g JsGen) gen_map_init_expr(it ast.MapInit) {
@@ -1490,7 +1439,8 @@ fn (mut g JsGen) gen_selector_expr(it ast.SelectorExpr) {
 }
 
 fn (mut g JsGen) gen_string_inter_literal(it ast.StringInterLiteral) {
-	g.write('`')
+	if g.file.mod.name == 'builtin' { g.write('new ') }
+	g.write('string(`')
 	for i, val in it.vals {
 		escaped_val := val.replace('`', '\\`')
 		g.write(escaped_val)
@@ -1514,7 +1464,7 @@ fn (mut g JsGen) gen_string_inter_literal(it ast.StringInterLiteral) {
 		}
 		g.write('}')
 	}
-	g.write('`')
+	g.write('`)')
 }
 
 fn (mut g JsGen) gen_struct_init(it ast.StructInit) {
@@ -1563,5 +1513,26 @@ fn (mut g JsGen) gen_typeof_expr(it ast.TypeOf) {
 		g.write('"$repr"')
 	} else {
 		g.write('"$sym.name"')
+	}
+}
+
+fn (mut g JsGen) gen_type_cast_expr(it ast.CastExpr) {
+	is_literal := (
+		(it.expr is ast.IntegerLiteral && it.typ in table.integer_type_idxs) ||
+		(it.expr is ast.FloatLiteral && it.typ in table.float_type_idxs)
+	)
+	typ := g.typ(it.typ)
+	if !is_literal {
+		if !(typ in v_types) || g.ns.name == 'builtin' {
+			g.write('new ')
+		}
+		g.write('${typ}(')
+	}
+	g.expr(it.expr)
+	if typ == 'string' && !(it.expr is ast.StringLiteral) {
+		g.write('.toString()')
+	}
+	if !is_literal {
+		g.write(')')
 	}
 }

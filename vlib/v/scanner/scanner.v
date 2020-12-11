@@ -26,6 +26,7 @@ pub mut:
 	is_inside_string            bool
 	is_inter_start              bool // for hacky string interpolation TODO simplify
 	is_inter_end                bool
+	is_enclosed_inter           bool
 	is_debug                    bool
 	line_comment                string
 	// prev_tok                 TokenKind
@@ -34,6 +35,7 @@ pub mut:
 	is_print_colored_error      bool
 	is_print_rel_paths_on_error bool
 	quote                       byte // which quote is used to denote current string: ' or "
+	inter_quote                 byte
 	line_ends                   []int // the positions of source lines ends   (i.e. \n signs)
 	nr_lines                    int // total number of lines in the source file that were scanned
 	is_vh                       bool // Keep newlines
@@ -117,25 +119,22 @@ pub fn new_scanner(text string, comments_mode CommentsMode, pref &pref.Preferenc
 }
 
 pub fn new_vet_scanner(text string, comments_mode CommentsMode, pref &pref.Preferences) &Scanner {
-	is_fmt := pref.is_fmt
-	mut s := &Scanner{
+	return &Scanner{
 		pref: pref
 		text: text
 		is_print_line_on_error: true
 		is_print_colored_error: true
 		is_print_rel_paths_on_error: true
-		is_fmt: is_fmt
+		is_fmt: pref.is_fmt
 		comments_mode: comments_mode
+		file_path: 'internal_memory'
 	}
-	s.file_path = 'internal_memory'
-	return s
 }
 
 [inline]
 fn (s &Scanner) should_parse_comment() bool {
-	res := (s.comments_mode == .parse_comments) ||
+	return (s.comments_mode == .parse_comments) ||
 		(s.comments_mode == .toplevel_comments && !s.is_inside_toplvl_statement)
-	return res
 }
 
 // NB: this is called by v's parser
@@ -580,7 +579,7 @@ fn (mut s Scanner) text_scan() token.Token {
 			}
 			// end of `$expr`
 			// allow `'$a.b'` and `'$a.c()'`
-			if s.is_inter_start && next_char == `\\` && s.look_ahead(2) !in [`x`, `n`, `r`, `\\`, `t`] {
+			if s.is_inter_start && next_char == `\\` && s.look_ahead(2) !in [`x`, `n`, `r`, `\\`, `t`, `e`] {
 				s.warn('unknown escape sequence \\${s.look_ahead(2)}')
 			}
 			if s.is_inter_start && next_char == `(` {
@@ -719,12 +718,18 @@ fn (mut s Scanner) text_scan() token.Token {
 			`}` {
 				// s = `hello $name !`
 				// s = `hello ${name} !`
-				if s.is_inside_string {
-					s.pos++
+				if s.is_enclosed_inter {
+					if s.pos < s.text.len - 1 {
+						s.pos++
+					} else {
+						s.error('unfinished string literal')
+					}
 					if s.text[s.pos] == s.quote {
 						s.is_inside_string = false
+						s.is_enclosed_inter = false
 						return s.new_token(.string, '', 1)
 					}
+					s.is_enclosed_inter = false
 					ident_string := s.ident_string()
 					return s.new_token(.string, ident_string, ident_string.len + 2) // + two quotes
 				} else {
@@ -793,7 +798,7 @@ fn (mut s Scanner) text_scan() token.Token {
 			`.` {
 				if nextc == `.` {
 					s.pos++
-					if s.text[s.pos + 1] == `.` {
+					if s.pos + 1 < s.text.len && s.text[s.pos + 1] == `.` {
 						s.pos++
 						return s.new_token(.ellipsis, '', 3)
 					}
@@ -996,8 +1001,12 @@ fn (mut s Scanner) ident_string() string {
 	is_quote := q == single_quote || q == double_quote
 	is_raw := is_quote && s.pos > 0 && s.text[s.pos - 1] == `r`
 	is_cstr := is_quote && s.pos > 0 && s.text[s.pos - 1] == `c`
-	if is_quote && !s.is_inside_string {
-		s.quote = q
+	if is_quote {
+		if s.is_inside_string {
+			s.inter_quote = q
+		} else {
+			s.quote = q
+		}
 	}
 	// if s.file_path.contains('string_test') {
 	// println('\nident_string() at char=${s.text[s.pos].str()}')
@@ -1005,18 +1014,26 @@ fn (mut s Scanner) ident_string() string {
 	// }
 	mut n_cr_chars := 0
 	mut start := s.pos
+	if s.text[start] == s.quote ||
+		(s.text[start] == s.inter_quote && (s.is_inter_start || s.is_enclosed_inter)) {
+		start++
+	}
 	s.is_inside_string = false
 	slash := `\\`
 	for {
 		s.pos++
 		if s.pos >= s.text.len {
 			s.error('unfinished string literal')
+			break
 		}
 		c := s.text[s.pos]
 		prevc := s.text[s.pos - 1]
 		// end of string
 		if c == s.quote && (prevc != slash || (prevc == slash && s.text[s.pos - 2] == slash)) {
 			// handle '123\\'  slash at the end
+			break
+		}
+		if c == s.inter_quote && (s.is_inter_start || s.is_enclosed_inter) {
 			break
 		}
 		if c == `\r` {
@@ -1026,7 +1043,7 @@ fn (mut s Scanner) ident_string() string {
 			s.inc_line_number()
 		}
 		// Don't allow \0
-		if c == `0` && s.pos > 2 && s.text[s.pos - 1] == slash {
+		if c == `0` && s.pos > 2 && prevc == slash {
 			if (s.pos < s.text.len - 1 && s.text[s.pos + 1].is_digit()) ||
 				s.count_symbol_before(s.pos - 1, slash) % 2 == 0 {
 			} else if !is_cstr && !is_raw {
@@ -1057,6 +1074,7 @@ fn (mut s Scanner) ident_string() string {
 		// ${var} (ignore in vfmt mode) (skip \$)
 		if prevc == `$` && c == `{` && !is_raw && s.count_symbol_before(s.pos - 2, slash) % 2 == 0 {
 			s.is_inside_string = true
+			s.is_enclosed_inter = true
 			// so that s.pos points to $ at the next step
 			s.pos -= 2
 			break
@@ -1071,9 +1089,6 @@ fn (mut s Scanner) ident_string() string {
 		}
 	}
 	mut lit := ''
-	if s.text[start] == s.quote {
-		start++
-	}
 	mut end := s.pos
 	if s.is_inside_string {
 		end++

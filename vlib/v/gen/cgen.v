@@ -114,7 +114,7 @@ mut:
 	// autofree_pregen_buf   strings.Builder
 	// autofree_tmp_vars     []string // to avoid redefining the same tmp vars in a single function
 	called_fn_name                   string
-	cur_mod                          string
+	cur_mod                          ast.Module
 	is_js_call                       bool // for handling a special type arg #1 `json.decode(User, ...)`
 	// nr_vars_to_free       int
 	// doing_autofree_tmp    bool
@@ -1089,7 +1089,8 @@ fn (mut g Gen) stmt(node ast.Stmt) {
 		ast.Module {
 			// g.is_builtin_mod = node.name == 'builtin'
 			g.is_builtin_mod = node.name in ['builtin', 'os', 'strconv', 'strings', 'gg']
-			g.cur_mod = node.name
+			// g.cur_mod = node.name
+			g.cur_mod = node
 		}
 		ast.Return {
 			g.write_defer_stmts_when_needed()
@@ -1234,16 +1235,17 @@ fn (mut g Gen) for_in(it ast.ForInStmt) {
 		idx := g.new_tmp_var()
 		atmp := g.new_tmp_var()
 		atmp_styp := g.typ(it.cond_type)
+		arw_or_pt := if it.cond_type.nr_muls() > 0 { '->' } else { '.' }
 		g.write('$atmp_styp $atmp = ')
 		g.expr(it.cond)
 		g.writeln(';')
-		g.writeln('for (int $idx = 0; $idx < ${atmp}.key_values.len; ++$idx) {')
+		g.writeln('for (int $idx = 0; $idx < $atmp${arw_or_pt}key_values.len; ++$idx) {')
 		// TODO: don't have this check when the map has no deleted elements
-		g.writeln('\tif (!DenseArray_has_index(&${atmp}.key_values, $idx)) {continue;}')
+		g.writeln('\tif (!DenseArray_has_index(&$atmp${arw_or_pt}key_values, $idx)) {continue;}')
 		if it.key_var != '_' {
 			key_styp := g.typ(it.key_type)
 			key := c_name(it.key_var)
-			g.writeln('\t$key_styp $key = /*key*/ *($key_styp*)DenseArray_key(&${atmp}.key_values, $idx);')
+			g.writeln('\t$key_styp $key = /*key*/ *($key_styp*)DenseArray_key(&$atmp${arw_or_pt}key_values, $idx);')
 			// TODO: analyze whether it.key_type has a .clone() method and call .clone() for all types:
 			if it.key_type == table.string_type {
 				g.writeln('\t$key = string_clone($key);')
@@ -1259,7 +1261,7 @@ fn (mut g Gen) for_in(it ast.ForInStmt) {
 				val_styp := g.typ(it.val_type)
 				g.write('\t$val_styp ${c_name(it.val_var)} = (*($val_styp*)')
 			}
-			g.writeln('DenseArray_value(&${atmp}.key_values, $idx));')
+			g.writeln('DenseArray_value(&$atmp${arw_or_pt}key_values, $idx));')
 		}
 		g.stmts(it.stmts)
 		if it.key_type == table.string_type && !g.is_builtin_mod {
@@ -1739,8 +1741,10 @@ fn (mut g Gen) gen_assign_stmt(assign_stmt ast.AssignStmt) {
 			// id_info := ident.var_info()
 			// var_type = id_info.typ
 			blank_assign = left.kind == .blank_ident
-			if left.info is ast.IdentVar {
-				share := (left.info as ast.IdentVar).share
+			// TODO: temporary, remove this
+			left_info := left.info
+			if left_info is ast.IdentVar {
+				share := left_info.share
 				if share == .shared_t {
 					var_type = var_type.set_flag(.shared_f)
 				}
@@ -2210,7 +2214,7 @@ fn (mut g Gen) autofree_var_call(free_fn_name string, v ast.Var) {
 	if v.typ.is_ptr() {
 		g.writeln('\t${free_fn_name}(${c_name(v.name)}); // autofreed ptr var')
 	} else {
-		g.writeln('\t${free_fn_name}(&${c_name(v.name)}); // autofreed var $g.cur_mod $g.is_builtin_mod')
+		g.writeln('\t${free_fn_name}(&${c_name(v.name)}); // autofreed var $g.cur_mod.name $g.is_builtin_mod')
 	}
 }
 
@@ -2611,7 +2615,8 @@ fn (mut g Gen) expr(node ast.Expr) {
 								g.write('(*')
 								cast_sym := g.table.get_type_symbol(typ)
 								if i != 0 {
-									sum_type_deref_field += ').'
+									dot := if field.typ.is_ptr() { '->' } else { '.' }
+									sum_type_deref_field += ')$dot'
 								}
 								if mut cast_sym.info is table.Aggregate {
 									agg_sym := g.table.get_type_symbol(cast_sym.info.types[g.aggregate_type_idx])
@@ -3411,19 +3416,20 @@ fn (mut g Gen) ident(node ast.Ident) {
 		g.write('_const_')
 	}
 	mut name := c_name(node.name)
-	if node.info is ast.IdentVar {
-		ident_var := node.info as ast.IdentVar
+	// TODO: temporary, remove this
+	node_info := node.info
+	if node_info is ast.IdentVar {
 		// x ?int
 		// `x = 10` => `x.data = 10` (g.right_is_opt == false)
 		// `x = new_opt()` => `x = new_opt()` (g.right_is_opt == true)
 		// `println(x)` => `println(*(int*)x.data)`
-		if ident_var.is_optional && !(g.is_assign_lhs && g.right_is_opt) {
+		if node_info.is_optional && !(g.is_assign_lhs && g.right_is_opt) {
 			g.write('/*opt*/')
-			styp := g.base_type(ident_var.typ)
+			styp := g.base_type(node_info.typ)
 			g.write('(*($styp*)${name}.data)')
 			return
 		}
-		if !g.is_assign_lhs && ident_var.share == .shared_t {
+		if !g.is_assign_lhs && node_info.share == .shared_t {
 			g.write('${name}.val')
 			return
 		}
@@ -3439,11 +3445,12 @@ fn (mut g Gen) ident(node ast.Ident) {
 						if i == 0 {
 							g.write(name)
 						}
+						dot := if v.typ.is_ptr() { '->' } else { '.' }
 						if mut cast_sym.info is table.Aggregate {
 							sym := g.table.get_type_symbol(cast_sym.info.types[g.aggregate_type_idx])
-							g.write('._$sym.cname')
+							g.write('${dot}_$sym.cname')
 						} else {
-							g.write('._$cast_sym.cname')
+							g.write('${dot}_$cast_sym.cname')
 						}
 						g.write(')')
 					}
@@ -3666,12 +3673,18 @@ fn (mut g Gen) index_expr(node ast.IndexExpr) {
 				is_selector := node.left is ast.SelectorExpr
 				if g.is_assign_lhs && !is_selector && node.is_setter {
 					is_direct_array_access := g.fn_decl != 0 && g.fn_decl.is_direct_arr
+					is_op_assign := g.assign_op != .assign && info.elem_type != table.string_type
 					array_ptr_type_str := match elem_typ.kind {
 						.function { 'voidptr*' }
 						else { '$elem_type_str*' }
 					}
 					if is_direct_array_access {
 						g.write('(($array_ptr_type_str)')
+					} else if is_op_assign {
+						g.write('(*($array_ptr_type_str)array_get(')
+						if left_is_ptr && !node.left_type.has_flag(.shared_f) {
+							g.write('*')
+						}
 					} else {
 						g.is_array_set = true // special handling of assign_op and closing with '})'
 						g.write('array_set(')
@@ -3680,7 +3693,6 @@ fn (mut g Gen) index_expr(node ast.IndexExpr) {
 						}
 					}
 					g.expr(node.left)
-					// TODO: test direct_array_access when 'shared' is implemented
 					if node.left_type.has_flag(.shared_f) {
 						if left_is_ptr {
 							g.write('->val')
@@ -3700,59 +3712,30 @@ fn (mut g Gen) index_expr(node ast.IndexExpr) {
 					} else {
 						g.write(', ')
 						g.expr(node.index)
-						mut need_wrapper := true
-						/*
-						match node.right {
-							ast.EnumVal, ast.Ident {
-								// `&x` is enough for variables and enums
-								// `&(Foo[]){ ... }` is only needed for function calls and literals
-								need_wrapper = false
+						if !is_op_assign {
+							mut need_wrapper := true
+							/*
+							match node.right {
+								ast.EnumVal, ast.Ident {
+									// `&x` is enough for variables and enums
+									// `&(Foo[]){ ... }` is only needed for function calls and literals
+									need_wrapper = false
+								}
+								else {}
 							}
-							else {}
-						}
-						*/
-						if need_wrapper {
-							if elem_typ.kind == .function {
-								g.write(', &(voidptr[]) { ')
+							*/
+							if need_wrapper {
+								if elem_typ.kind == .function {
+									g.write(', &(voidptr[]) { ')
+								} else {
+									g.write(', &($elem_type_str[]) { ')
+								}
 							} else {
-								g.write(', &($elem_type_str[]) { ')
+								g.write(', &')
 							}
 						} else {
-							g.write(', &')
-						}
-						// `x[0] *= y`
-						if g.assign_op != .assign &&
-							g.assign_op in token.assign_tokens && info.elem_type != table.string_type {
-							// TODO move this
-							g.write('*($elem_type_str*)array_get(')
-							if left_is_ptr && !node.left_type.has_flag(.shared_f) {
-								g.write('*')
-							}
-							g.expr(node.left)
-							if node.left_type.has_flag(.shared_f) {
-								if left_is_ptr {
-									g.write('->val')
-								} else {
-									g.write('.val')
-								}
-							}
-							g.write(', ')
-							g.expr(node.index)
-							g.write(') ')
-							op := match g.assign_op {
-								.mult_assign { '*' }
-								.plus_assign { '+' }
-								.minus_assign { '-' }
-								.div_assign { '/' }
-								.xor_assign { '^' }
-								.mod_assign { '%' }
-								.or_assign { '|' }
-								.and_assign { '&' }
-								.left_shift_assign { '<<' }
-								.right_shift_assign { '>>' }
-								else { '' }
-							}
-							g.write(op)
+							// `x[0] *= y`
+							g.write('))')
 						}
 					}
 				} else {
@@ -5181,7 +5164,7 @@ fn op_to_fn_name(name string) string {
 	}
 }
 
-fn (mut g Gen) comp_if_to_ifdef(name string, is_comptime_optional bool) string {
+fn (mut g Gen) comp_if_to_ifdef(name string, is_comptime_optional bool) ?string {
 	match name {
 		// platforms/os-es:
 		'windows' {
@@ -5303,11 +5286,10 @@ fn (mut g Gen) comp_if_to_ifdef(name string, is_comptime_optional bool) string {
 				(g.pref.compile_defines_all.len > 0 && name in g.pref.compile_defines_all) {
 				return 'CUSTOM_DEFINE_$name'
 			}
-			verror('bad os ifdef name "$name"') // should never happen, caught in the checker
+			return error('bad os ifdef name "$name"') // should never happen, caught in the checker
 		}
 	}
-	// verror('bad os ifdef name "$name"')
-	return ''
+	return none
 }
 
 [inline]
@@ -5619,9 +5601,6 @@ fn (mut g Gen) interface_table() string {
 			continue
 		}
 		inter_info := ityp.info as table.Interface
-		if inter_info.types.len == 0 {
-			continue
-		}
 		// interface_name is for example Speaker
 		interface_name := c_name(ityp.name)
 		// generate a struct that references interface methods
@@ -5650,7 +5629,15 @@ fn (mut g Gen) interface_table() string {
 		// generate an array of the interface methods for the structs using the interface
 		// as well as case functions from the struct to the interface
 		mut methods_struct := strings.new_builder(100)
-		methods_struct.writeln('$methods_struct_name ${interface_name}_name_table[$inter_info.types.len] = {')
+		//
+		mut staticprefix := 'static'
+		iname_table_length := inter_info.types.len
+		if iname_table_length == 0 {
+			// msvc can not process `static struct x[0] = {};`
+			methods_struct.writeln('$staticprefix $methods_struct_name ${interface_name}_name_table[1];')
+		} else {
+			methods_struct.writeln('$staticprefix $methods_struct_name ${interface_name}_name_table[$iname_table_length] = {')
+		}
 		mut cast_functions := strings.new_builder(100)
 		cast_functions.write('// Casting functions for interface "$interface_name"')
 		mut methods_wrapper := strings.new_builder(100)
@@ -5662,6 +5649,10 @@ fn (mut g Gen) interface_table() string {
 			// cctype is the Cleaned Concrete Type name, *without ptr*,
 			// i.e. cctype is always just Cat, not Cat_ptr:
 			cctype := g.cc_type(st)
+			$if debug_interface_table ? {
+				eprintln('>> interface name: $ityp.name | concrete type: $st.debug() | st symname: ' +
+					g.table.get_type_symbol(st).name)
+			}
 			// Speaker_Cat_index = 0
 			interface_index_name := '_${interface_name}_${cctype}_index'
 			if already_generated_mwrappers[interface_index_name] > 0 {
@@ -5732,7 +5723,11 @@ _Interface* I_${cctype}_to_Interface_${interface_name}_ptr($cctype* x) {
 			sb.writeln('int $interface_index_name = $iin_idx;')
 		}
 		sb.writeln('// ^^^ number of types for interface $interface_name: ${current_iinidx - iinidx_minimum_base}')
-		methods_struct.writeln('};')
+		if iname_table_length == 0 {
+			methods_struct.writeln('')
+		} else {
+			methods_struct.writeln('};')
+		}
 		// add line return after interface index declarations
 		sb.writeln('')
 		sb.writeln(methods_wrapper.str())

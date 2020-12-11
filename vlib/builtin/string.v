@@ -111,6 +111,22 @@ pub fn tos3(s charptr) string {
 	}
 }
 
+// Same as `tos2`, but returns empty string on nil ptr
+pub fn tos4(s byteptr) string {
+	if s == 0 {
+		return ""
+	}
+	return tos2(s)
+}
+
+// Same as `tos4`, but for char*, to avoid warnings
+pub fn tos5(s charptr) string {
+	if s == 0 {
+		return ""
+	}
+	return tos3(s)
+}
+
 [deprecated]
 pub fn tos_lit(s charptr) string {
 	eprintln('warning: `tos_lit` has been deprecated, use `_SLIT` instead')
@@ -164,6 +180,10 @@ fn (a string) clone_static() string {
 }
 
 pub fn (a string) clone() string {
+	if a == '' {
+		// TODO perf? an extra check in each clone() is not nice
+		return ''
+	}
 	mut b := string{
 		str: unsafe {malloc(a.len + 1)}
 		len: a.len
@@ -484,7 +504,7 @@ pub fn (s string) split_nth(delim string, nth int) []string {
 		i = 1
 		for ch in s {
 			if nth > 0 && i >= nth {
-				res << s.substr(i, s.len)
+				res << s.right(i)
 				break
 			}
 			res << ch.str()
@@ -493,38 +513,29 @@ pub fn (s string) split_nth(delim string, nth int) []string {
 		return res
 	}
 	mut start := 0
-	nth_1 := nth - 1
+	// Take the left part for each delimiter occurence
 	for i <= s.len {
-		mut is_delim := unsafe {s.str[i] == delim.str[0]}
-		mut j := 0
-		for is_delim && j < delim.len {
-			is_delim = is_delim && unsafe {s.str[i + j] == delim.str[j]}
-			j++
-		}
-		last := i == s.len - 1
-		if is_delim || last {
-			if !is_delim && last {
-				i++
-			}
-			mut val := s.substr(start, i)
-			if val.starts_with(delim) {
-				val = val.right(delim.len)
-			}
-			was_last := nth > 0 && res.len == nth_1
+		is_delim := i + delim.len <= s.len && s.substr(i, i + delim.len) == delim
+		if is_delim {
+			val := s.substr(start, i)
+			was_last := nth > 0 && res.len == nth - 1
 			if was_last {
-				res << s.right(start)
 				break
 			}
 			res << val
 			start = i + delim.len
+			i = start
+		} else {
+			i++
 		}
-		i++
 	}
-	if s.ends_with(delim) && (nth < 1 || res.len < nth) {
-		res << ''
+	// Then the remaining right part of the string
+	if nth < 1 || res.len < nth {
+		res << s.right(start)
 	}
 	return res
 }
+
 
 pub fn (s string) split_into_lines() []string {
 	mut res := []string{}
@@ -581,6 +592,9 @@ pub fn (s string) substr(start int, end int) string {
 		}
 	}
 	len := end - start
+	if len == s.len {
+		return s.clone()
+	}
 	mut res := string{
 		str: malloc(len + 1)
 		len: len

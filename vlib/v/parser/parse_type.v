@@ -21,6 +21,10 @@ pub fn (mut p Parser) parse_array_type() table.Type {
 	// array
 	p.check(.rsbr)
 	elem_type := p.parse_type()
+	if elem_type.idx() == 0 {
+		// error is set in parse_type
+		return 0
+	}
 	mut nr_dims := 1
 	// detect attr
 	not_attr := p.peek_tok.kind != .name && p.peek_tok2.kind !in [.semicolon, .rsbr]
@@ -165,6 +169,10 @@ pub fn (mut p Parser) parse_type() table.Type {
 	if p.tok.kind != .lcbr {
 		pos := p.tok.position()
 		typ = p.parse_any_type(language, nr_muls > 0, true)
+		if typ.idx() == 0 {
+			// error is set in parse_type
+			return 0
+		}
 		if typ == table.void_type {
 			p.error_with_pos('use `?` instead of `?void`', pos)
 			return 0
@@ -217,6 +225,8 @@ pub fn (mut p Parser) parse_any_type(language table.Language, is_ptr bool, check
 		}
 	} else if p.expr_mod != '' && !p.in_generic_params { // p.expr_mod is from the struct and not from the generic parameter
 		name = p.expr_mod + '.' + name
+	} else if name in p.imported_symbols {
+		name = p.imported_symbols[name]
 	} else if p.mod != 'builtin' && name.len > 1 && name !in p.table.type_idxs {
 		// `Foo` in module `mod` means `mod.Foo`
 		name = p.mod + '.' + name
@@ -252,7 +262,7 @@ pub fn (mut p Parser) parse_any_type(language table.Language, is_ptr bool, check
 			}
 			if name == '' {
 				// This means the developer is using some wrong syntax like `x: int` instead of `x int`
-				p.error('bad type syntax')
+				p.error('expecting type declaration')
 				return 0
 			}
 			match name {

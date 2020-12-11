@@ -15,11 +15,12 @@ import runtime
 import time
 
 pub struct Parser {
+	pref              &pref.Preferences
+mut:
 	file_base         string // "hello.v"
 	file_name         string // "/home/user/hello.v"
 	file_name_dir     string // "/home/user"
-	pref              &pref.Preferences
-mut:
+	file_backend_mode table.Language // .c for .c.v|.c.vv|.c.vsh files; .js for .js.v files, .v otherwise.
 	scanner           &scanner.Scanner
 	comments_mode     scanner.CommentsMode = .skip_comments
 	// see comment in parse_file
@@ -46,6 +47,7 @@ mut:
 	imports           map[string]string // alias => mod_name
 	ast_imports       []ast.Import // mod_names
 	used_imports      []string // alias
+	imported_symbols  map[string]string
 	is_amp            bool // for generating the right code for `&Foo{}`
 	returns           bool
 	inside_match      bool // to separate `match A { }` from `Struct{}`
@@ -64,12 +66,10 @@ mut:
 
 // for tests
 pub fn parse_stmt(text string, table &table.Table, scope &ast.Scope) ast.Stmt {
-	pref := &pref.Preferences{}
-	s := scanner.new_scanner(text, .skip_comments, pref)
 	mut p := Parser{
-		scanner: s
+		scanner: scanner.new_scanner(text, .skip_comments, &pref.Preferences{})
 		table: table
-		pref: pref
+		pref: &pref.Preferences{}
 		scope: scope
 		global_scope: &ast.Scope{
 			start_pos: 0
@@ -82,9 +82,8 @@ pub fn parse_stmt(text string, table &table.Table, scope &ast.Scope) ast.Stmt {
 }
 
 pub fn parse_comptime(text string, table &table.Table, pref &pref.Preferences, scope &ast.Scope, global_scope &ast.Scope) ast.File {
-	s := scanner.new_scanner(text, .skip_comments, pref)
 	mut p := Parser{
-		scanner: s
+		scanner: scanner.new_scanner(text, .skip_comments, pref)
 		table: table
 		pref: pref
 		scope: scope
@@ -96,13 +95,9 @@ pub fn parse_comptime(text string, table &table.Table, pref &pref.Preferences, s
 }
 
 pub fn parse_text(text string, path string, table &table.Table, comments_mode scanner.CommentsMode, pref &pref.Preferences, global_scope &ast.Scope) ast.File {
-	s := scanner.new_scanner(text, comments_mode, pref)
 	mut p := Parser{
-		scanner: s
+		scanner: scanner.new_scanner(text, comments_mode, pref)
 		comments_mode: comments_mode
-		file_name: path
-		file_base: os.base(path)
-		file_name_dir: os.dir(path)
 		table: table
 		pref: pref
 		scope: &ast.Scope{
@@ -113,7 +108,21 @@ pub fn parse_text(text string, path string, table &table.Table, comments_mode sc
 		warnings: []errors.Warning{}
 		global_scope: global_scope
 	}
+	p.set_path(path)
 	return p.parse()
+}
+
+pub fn (mut p Parser) set_path(path string) {
+	p.file_name = path
+	p.file_base = os.base(path)
+	p.file_name_dir = os.dir(path)
+	if path.ends_with('.c.v') || path.ends_with('.c.vv') || path.ends_with('.c.vsh') {
+		p.file_backend_mode = .c
+	} else if path.ends_with('.js.v') || path.ends_with('.js.vv') || path.ends_with('.js.vsh') {
+		p.file_backend_mode = .js
+	} else {
+		p.file_backend_mode = .v
+	}
 }
 
 pub fn parse_file(path string, table &table.Table, comments_mode scanner.CommentsMode, pref &pref.Preferences, global_scope &ast.Scope) ast.File {
@@ -129,9 +138,6 @@ pub fn parse_file(path string, table &table.Table, comments_mode scanner.Comment
 		scanner: scanner.new_scanner_file(path, comments_mode, pref)
 		comments_mode: comments_mode
 		table: table
-		file_name: path
-		file_base: os.base(path)
-		file_name_dir: os.dir(path)
 		pref: pref
 		scope: &ast.Scope{
 			start_pos: 0
@@ -141,6 +147,7 @@ pub fn parse_file(path string, table &table.Table, comments_mode scanner.Comment
 		warnings: []errors.Warning{}
 		global_scope: global_scope
 	}
+	p.set_path(path)
 	return p.parse()
 }
 
@@ -152,9 +159,6 @@ pub fn parse_vet_file(path string, table_ &table.Table, pref &pref.Preferences) 
 		scanner: scanner.new_vet_scanner_file(path, .parse_comments, pref)
 		comments_mode: .parse_comments
 		table: table_
-		file_name: path
-		file_base: os.base(path)
-		file_name_dir: os.dir(path)
 		pref: pref
 		scope: &ast.Scope{
 			start_pos: 0
@@ -164,6 +168,7 @@ pub fn parse_vet_file(path string, table_ &table.Table, pref &pref.Preferences) 
 		warnings: []errors.Warning{}
 		global_scope: global_scope
 	}
+	p.set_path(path)
 	if p.scanner.text.contains('\n  ') {
 		source_lines := os.read_lines(path) or { []string{} }
 		for lnumber, line in source_lines {
@@ -218,6 +223,7 @@ pub fn (mut p Parser) parse() ast.File {
 		path: p.file_name
 		mod: module_decl
 		imports: p.ast_imports
+		imported_symbols: p.imported_symbols
 		stmts: stmts
 		scope: p.scope
 		global_scope: p.global_scope
@@ -346,12 +352,8 @@ pub fn (mut p Parser) parse_block_no_scope(is_top_level bool) []ast.Stmt {
 	mut stmts := []ast.Stmt{}
 	if p.tok.kind != .rcbr {
 		mut c := 0
-		for {
+		for p.tok.kind !in [.eof, .rcbr] {
 			stmts << p.stmt(is_top_level)
-			// p.warn('after stmt(): tok=$p.tok.str()')
-			if p.tok.kind in [.eof, .rcbr] {
-				break
-			}
 			c++
 			if c % 100000 == 0 {
 				eprintln('parsed $c statements so far from fn $p.cur_fn_name ...')
@@ -397,11 +399,10 @@ fn (mut p Parser) check(expected token.Kind) {
 	if p.tok.kind != expected {
 		if p.tok.kind == .name {
 			p.error('unexpected name `$p.tok.lit`, expecting `$expected.str()`')
-			return
 		} else {
 			p.error('unexpected `$p.tok.kind.str()`, expecting `$expected.str()`')
-			return
 		}
+		return
 	}
 	p.next()
 }
@@ -574,7 +575,7 @@ pub fn (mut p Parser) eat_comments() []ast.Comment {
 	return comments
 }
 
-pub fn (mut p Parser) eat_lineend_comments() []ast.Comment {
+pub fn (mut p Parser) eat_line_end_comments() []ast.Comment {
 	mut comments := []ast.Comment{}
 	for {
 		if p.tok.kind != .comment || p.tok.line_nr != p.prev_tok.line_nr {
@@ -843,6 +844,29 @@ fn (mut p Parser) parse_attr() table.Attr {
 	}
 }
 
+pub fn (mut p Parser) check_for_impure_v(language table.Language, pos token.Position) {
+	if language == .v {
+		// pure V code is always allowed everywhere
+		return
+	}
+	if !p.pref.warn_impure_v {
+		// the stricter mode is not ON yet => allow everything for now
+		return
+	}
+	if p.file_backend_mode != language {
+		upcase_language := language.str().to_upper()
+		if p.file_backend_mode == .v {
+			p.warn_with_pos('$upcase_language code will not be allowed in pure .v files, please move it to a .${language}.v file instead',
+				pos)
+			return
+		} else {
+			p.warn_with_pos('$upcase_language code is not allowed in .${p.file_backend_mode}.v files, please move it to a .${language}.v file',
+				pos)
+			return
+		}
+	}
+}
+
 pub fn (mut p Parser) error(s string) {
 	p.error_with_pos(s, p.tok.position())
 }
@@ -1014,12 +1038,13 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 			pos: type_pos
 		}
 	}
-	language := if p.tok.lit == 'C' {
-		table.Language.c
+	mut language := table.Language.v
+	if p.tok.lit == 'C' {
+		language = table.Language.c
+		p.check_for_impure_v(language, p.tok.position())
 	} else if p.tok.lit == 'JS' {
-		table.Language.js
-	} else {
-		table.Language.v
+		language = table.Language.js
+		p.check_for_impure_v(language, p.tok.position())
 	}
 	mut mod := ''
 	// p.warn('resetting')
@@ -1103,7 +1128,8 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 			if p.tok.lit in p.imports {
 				// mark the imported module as used
 				p.register_used_import(p.tok.lit)
-				if p.peek_tok.kind == .dot && p.peek_tok2.lit[0].is_capital() {
+				if p.peek_tok.kind == .dot &&
+					p.peek_tok2.kind != .eof && p.peek_tok2.lit[0].is_capital() {
 					is_mod_cast = true
 				}
 			}
@@ -1114,7 +1140,7 @@ pub fn (mut p Parser) name_expr() ast.Expr {
 		p.check(.dot)
 		p.expr_mod = mod
 	}
-	lit0_is_capital := p.tok.lit[0].is_capital()
+	lit0_is_capital := if p.tok.kind != .eof { p.tok.lit[0].is_capital() } else { false }
 	// use heuristics to detect `func<T>()` from `var < expr`
 	is_generic_call := !lit0_is_capital && p.peek_tok.kind == .lt && (match p.peek_tok2.kind {
 		.name {
@@ -1681,44 +1707,11 @@ fn (mut p Parser) import_syms(mut parent ast.Import) {
 	for p.tok.kind == .name {
 		pos := p.tok.position()
 		alias := p.check_name()
-		name := '${parent.mod}.$alias'
-		if alias[0].is_capital() {
-			idx := p.table.add_placeholder_type(name, .v)
-			typ := table.new_type(idx)
-			prepend_mod_name := p.prepend_mod(alias)
-			p.table.register_type_symbol(table.TypeSymbol{
-				kind: .alias
-				name: prepend_mod_name
-				cname: util.no_dots(prepend_mod_name)
-				mod: p.mod
-				parent_idx: idx
-				info: table.Alias{
-					parent_type: typ
-					language: table.Language.v
-					is_import: true
-				}
-				is_public: false
-			})
-			// so we can work with the fully declared type in fmt+checker
-			parent.syms << ast.ImportSymbol{
-				pos: pos
-				name: alias
-				kind: .type_
-			}
-		} else {
-			if !p.table.known_fn(name) {
-				p.table.fns[alias] = table.Fn{
-					is_placeholder: true
-					mod: parent.mod
-					name: name
-				}
-			}
-			// so we can work with this in fmt+checker
-			parent.syms << ast.ImportSymbol{
-				pos: pos
-				name: alias
-				kind: .fn_
-			}
+		p.imported_symbols[alias] = parent.mod + '.' + alias
+		// so we can work with this in fmt+checker
+		parent.syms << ast.ImportSymbol{
+			pos: pos
+			name: alias
 		}
 		if p.tok.kind == .comma { // go again if more than one
 			p.next()
@@ -1955,7 +1948,7 @@ $pubfn (mut e  $enum_name) toggle(flag $enum_name)   { unsafe{ *e = int(*e) ^  (
 //
 ')
 	}
-	p.table.register_type_symbol(table.TypeSymbol{
+	idx := p.table.register_type_symbol(table.TypeSymbol{
 		kind: .enum_
 		name: name
 		cname: util.no_dots(name)
@@ -1966,6 +1959,10 @@ $pubfn (mut e  $enum_name) toggle(flag $enum_name)   { unsafe{ *e = int(*e) ^  (
 			is_multi_allowed: is_multi_allowed
 		}
 	})
+	if idx == -1 {
+		p.error_with_pos('cannot register enum `$name`, another type with this name exists',
+			end_pos)
+	}
 	return ast.EnumDecl{
 		name: name
 		is_pub: is_pub
@@ -2001,7 +1998,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		// function type: `type mycallback fn(string, int)`
 		fn_name := p.prepend_mod(name)
 		fn_type := p.parse_fn_type(fn_name)
-		comments = p.eat_lineend_comments()
+		comments = p.eat_line_end_comments()
 		return ast.FnTypeDecl{
 			name: fn_name
 			is_pub: is_pub
@@ -2048,7 +2045,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 			}
 			is_public: is_pub
 		})
-		comments = p.eat_lineend_comments()
+		comments = p.eat_line_end_comments()
 		return ast.SumTypeDecl{
 			name: name
 			is_pub: is_pub
@@ -2061,12 +2058,13 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 	parent_type := first_type
 	parent_name := p.table.get_type_symbol(parent_type).name
 	pid := parent_type.idx()
-	language := if parent_name.len > 2 && parent_name.starts_with('C.') {
-		table.Language.c
+	mut language := table.Language.v
+	if parent_name.len > 2 && parent_name.starts_with('C.') {
+		language = table.Language.c
+		p.check_for_impure_v(language, decl_pos)
 	} else if parent_name.len > 2 && parent_name.starts_with('JS.') {
-		table.Language.js
-	} else {
-		table.Language.v
+		language = table.Language.js
+		p.check_for_impure_v(language, decl_pos)
 	}
 	prepend_mod_name := p.prepend_mod(name)
 	p.table.register_type_symbol(table.TypeSymbol{
@@ -2081,7 +2079,7 @@ fn (mut p Parser) type_decl() ast.TypeDecl {
 		}
 		is_public: is_pub
 	})
-	comments = p.eat_lineend_comments()
+	comments = p.eat_line_end_comments()
 	return ast.AliasTypeDecl{
 		name: name
 		is_pub: is_pub

@@ -167,7 +167,7 @@ jobs:
     - name: Fixed tests
       run: VJOBS=1 ./v -silent test-fixed
     - name: Build examples
-      run: ./v -silent build-examples
+      run: ./v build-examples
     - name: Build examples with -autofree
       run: |
         ./v -autofree -o tetris examples/tetris/tetris.v
@@ -231,7 +231,7 @@ jobs:
     - name: Fixed tests (-prod)
       run: ./v -o vprod -prod cmd/v && ./vprod -silent test-fixed
     - name: Build examples
-      run: ./v -silent build-examples
+      run: ./v build-examples
     - name: Build examples with -autofree
       run: |
         ./v -autofree -experimental -o tetris examples/tetris/tetris.v
@@ -595,3 +595,19 @@ jobs:
         with:
             name: client wss
             path: ${{github.workspace}}/reports_wss/clients/index.html
+
+  parser-silent:
+    name: Parser silent mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build local v
+      run: make -j4
+    - name: Run test-parser
+      run: |
+        ./v test-parser examples/hello_world.v
+        ./v test-parser examples/hanoi.v
+        ./v test-parser examples/fibonacci.v
+        ./v test-parser examples/cli.v
+        ./v test-parser examples/json.v

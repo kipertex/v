@@ -149,10 +149,18 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 	if g.pref.is_prof {
 		g.profile_fn(it)
 	}
+	// we could be in an anon fn so save outer fn defer stmts
+	prev_defer_stmts := g.defer_stmts
+	g.defer_stmts = []
 	g.stmts(it.stmts)
 	//
 	if it.return_type == table.void_type {
 		g.write_defer_stmts_when_needed()
+	}
+	if it.is_anon {
+		g.defer_stmts = prev_defer_stmts
+	} else {
+		g.defer_stmts = []
 	}
 	if it.return_type != table.void_type && it.stmts.len > 0 && it.stmts.last() !is ast.Return {
 		default_expr := g.type_default(it.return_type)
@@ -164,7 +172,6 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 		}
 	}
 	g.writeln('}')
-	g.defer_stmts = []
 	if g.pref.printfn_list.len > 0 && g.last_fn_c_name in g.pref.printfn_list {
 		println(g.out.after(fn_start_pos))
 	}
@@ -317,6 +324,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	mut receiver_type_name := util.no_dots(g.cc_type2(g.unwrap_generic(node.receiver_type)))
 	if typ_sym.kind == .interface_ {
 		// Speaker_name_table[s._interface_idx].speak(s._object)
+		$if debug_interface_method_call ? {
+			eprintln('>>> interface typ_sym.name: $typ_sym.name | receiver_type_name: $receiver_type_name')
+		}
 		g.write('${c_name(receiver_type_name)}_name_table[')
 		g.expr(node.left)
 		dot := if node.left_type.is_ptr() { '->' } else { '.' }

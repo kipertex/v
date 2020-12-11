@@ -114,6 +114,16 @@ pub mut:
 	name_type  table.Type // T in `T.name` or typeof in `typeof(expr).name`
 }
 
+// root_ident returns the origin ident where the selector started.
+pub fn (e &SelectorExpr) root_ident() Ident {
+	mut root := e.expr
+	for root is SelectorExpr {
+		selector_expr := root as SelectorExpr
+		root = selector_expr.expr
+	}
+	return root as Ident
+}
+
 // module declaration
 pub struct Module {
 pub:
@@ -207,6 +217,7 @@ pub:
 	expr          Expr
 	pos           token.Position
 	comments      []Comment
+	next_comments []Comment
 pub mut:
 	name          string
 	typ           table.Type
@@ -233,16 +244,10 @@ pub mut:
 	syms  []ImportSymbol
 }
 
-pub enum ImportSymbolKind {
-	fn_
-	type_
-}
-
 pub struct ImportSymbol {
 pub:
 	pos  token.Position
 	name string
-	kind ImportSymbolKind
 }
 
 pub struct AnonFn {
@@ -254,33 +259,34 @@ pub mut:
 
 pub struct FnDecl {
 pub:
-	name          string
-	mod           string
-	params        []table.Param
-	is_deprecated bool
-	is_pub        bool
-	is_variadic   bool
-	is_anon       bool
-	receiver      Field
-	receiver_pos  token.Position
-	is_method     bool
-	method_idx    int
-	rec_mut       bool // is receiver mutable
-	rec_share     table.ShareType
-	language      table.Language
-	no_body       bool // just a definition `fn C.malloc()`
-	is_builtin    bool // this function is defined in builtin/strconv
-	pos           token.Position
-	body_pos      token.Position
-	file          string
-	is_generic    bool
-	is_direct_arr bool // direct array access
-	attrs         []table.Attr
+	name            string
+	mod             string
+	params          []table.Param
+	is_deprecated   bool
+	is_pub          bool
+	is_variadic     bool
+	is_anon         bool
+	receiver        Field
+	receiver_pos    token.Position
+	is_method       bool
+	method_type_pos token.Position
+	method_idx      int
+	rec_mut         bool // is receiver mutable
+	rec_share       table.ShareType
+	language        table.Language
+	no_body         bool // just a definition `fn C.malloc()`
+	is_builtin      bool // this function is defined in builtin/strconv
+	pos             token.Position
+	body_pos        token.Position
+	file            string
+	is_generic      bool
+	is_direct_arr   bool // direct array access
+	attrs           []table.Attr
 pub mut:
-	stmts         []Stmt
-	return_type   table.Type
-	comments      []Comment // comments *after* the header, but *before* `{`; used for InterfaceDecl
-	source_file   &File = 0
+	stmts           []Stmt
+	return_type     table.Type
+	comments        []Comment // comments *after* the header, but *before* `{`; used for InterfaceDecl
+	source_file     &File = 0
 }
 
 // break, continue
@@ -406,16 +412,17 @@ pub mut:
 
 pub struct File {
 pub:
-	path         string
-	mod          Module
-	global_scope &Scope
+	path             string
+	mod              Module
+	global_scope     &Scope
 pub mut:
-	scope        &Scope
-	stmts        []Stmt
-	imports      []Import
-	errors       []errors.Error
-	warnings     []errors.Warning
-	generic_fns  []&FnDecl
+	scope            &Scope
+	stmts            []Stmt
+	imports          []Import
+	imported_symbols map[string]string // 'Type' => 'module.Type'
+	errors           []errors.Error
+	warnings         []errors.Warning
+	generic_fns      []&FnDecl
 }
 
 pub struct IdentFn {
@@ -1113,6 +1120,13 @@ pub fn (expr Expr) is_expr() bool {
 		else {}
 	}
 	return true
+}
+
+pub fn (expr Expr) is_lit() bool {
+	return match expr {
+		BoolLiteral, StringLiteral, IntegerLiteral { true }
+		else { false }
+	}
 }
 
 // check if stmt can be an expression in C
