@@ -10,13 +10,6 @@ import v.table
 import v.token
 import vweb.tmpl
 
-// #flag darwin -I.
-const (
-	supported_platforms  = ['windows', 'macos', 'darwin', 'linux', 'freebsd', 'openbsd', 'netbsd',
-		'dragonfly', 'android', 'js', 'solaris', 'haiku', 'linux_or_macos']
-	supported_ccompilers = ['tinyc', 'clang', 'mingw', 'msvc', 'gcc']
-)
-
 // // #include, #flag, #v
 fn (mut p Parser) hash() ast.HashStmt {
 	mut pos := p.prev_tok.position()
@@ -126,7 +119,8 @@ fn (mut p Parser) vweb() ast.ComptimeCall {
 	for stmt in file.stmts {
 		if stmt is ast.FnDecl {
 			if stmt.name == 'main.vweb_tmpl_$tmp_fn_name' {
-				mut tmpl_scope := file.scope.innermost(stmt.body_pos.pos)
+				// mut tmpl_scope := file.scope.innermost(stmt.body_pos.pos)
+				mut tmpl_scope := stmt.scope
 				for _, obj in p.scope.objects {
 					if obj is ast.Var {
 						mut v := obj

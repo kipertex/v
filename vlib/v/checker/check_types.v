@@ -74,10 +74,12 @@ pub fn (mut c Checker) check_basic(got table.Type, expected table.Type) bool {
 		(exp_type_sym.is_int() && got_type_sym.kind == .enum_) {
 		return true
 	}
-	// TODO
-	// if got_type_sym.kind == .array && exp_type_sym.kind == .array {
-	// return true
-	// }
+	// array fn
+	if got_type_sym.kind == .array && exp_type_sym.kind == .array {
+		if c.table.type_to_str(got) == c.table.type_to_str(expected) {
+			return true
+		}
+	}
 	if got_type_sym.kind == .array_fixed && exp_type_sym.kind == .byteptr {
 		info := got_type_sym.info as table.ArrayFixed
 		if info.elem_type.idx() == table.byte_type_idx {
@@ -283,9 +285,14 @@ pub fn (mut c Checker) check_expected(got table.Type, expected table.Type) ? {
 	if c.check_types(got, expected) {
 		return
 	}
+	return error(c.expected_msg(got, expected))
+}
+
+[inline]
+fn (c &Checker) expected_msg(got table.Type, expected table.Type) string {
 	exps := c.table.type_to_str(expected)
 	gots := c.table.type_to_str(got)
-	return error('expected `$exps`, not `$gots`')
+	return 'expected `$exps`, not `$gots`'
 }
 
 pub fn (mut c Checker) symmetric_check(left table.Type, right table.Type) bool {
@@ -325,6 +332,9 @@ pub fn (c &Checker) get_default_fmt(ftyp table.Type, typ table.Type) byte {
 			if info.parent_type == table.string_type {
 				return `s`
 			}
+		}
+		if sym.kind == .function {
+			return `s`
 		}
 		if ftyp in [table.string_type, table.bool_type] ||
 			sym.kind in

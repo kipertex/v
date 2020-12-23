@@ -233,6 +233,9 @@ fn (mut s Scanner) ident_hex_number() string {
 	mut first_wrong_digit_pos := 0
 	mut first_wrong_digit := `\0`
 	start_pos := s.pos
+	if s.pos + 2 >= s.text.len {
+		return '0x'
+	}
 	s.pos += 2 // skip '0x'
 	if s.text[s.pos] == num_sep {
 		s.error('separator `_` is only valid between digits in a numeric literal')
@@ -763,8 +766,11 @@ fn (mut s Scanner) text_scan() token.Token {
 				return s.new_token(.comma, '', 1)
 			}
 			`@` {
-				s.pos++
-				name := s.ident_name()
+				mut name := ''
+				if nextc != `\0` {
+					s.pos++
+					name = s.ident_name()
+				}
 				if s.is_fmt {
 					return s.new_token(.name, '@' + name, name.len + 1)
 				}
@@ -887,10 +893,12 @@ fn (mut s Scanner) text_scan() token.Token {
 				if nextc == `=` {
 					s.pos++
 					return s.new_token(.ne, '', 2)
-				} else if nextc == `i` && s.text[s.pos + 2] == `n` && s.text[s.pos + 3].is_space() {
+				} else if s.text.len > s.pos + 3 &&
+					nextc == `i` && s.text[s.pos + 2] == `n` && s.text[s.pos + 3].is_space() {
 					s.pos += 2
 					return s.new_token(.not_in, '', 3)
-				} else if nextc == `i` && s.text[s.pos + 2] == `s` && s.text[s.pos + 3].is_space() {
+				} else if s.text.len > s.pos + 3 &&
+					nextc == `i` && s.text[s.pos + 2] == `s` && s.text[s.pos + 3].is_space() {
 					s.pos += 2
 					return s.new_token(.not_is, '', 3)
 				} else {
@@ -918,7 +926,7 @@ fn (mut s Scanner) text_scan() token.Token {
 					}
 					if s.should_parse_comment() {
 						s.line_comment = s.text[start + 1..comment_line_end]
-						mut comment := s.line_comment.trim_space()
+						mut comment := s.line_comment
 						// Find out if this comment is on its own line (for vfmt)
 						mut is_separate_line_comment := true
 						for j := start - 2; j >= 0 && s.text[j] != `\n`; j-- {
@@ -940,7 +948,7 @@ fn (mut s Scanner) text_scan() token.Token {
 					start := s.pos + 2
 					mut nest_count := 1
 					// Skip comment
-					for nest_count > 0 {
+					for nest_count > 0 && s.pos < s.text.len - 1 {
 						s.pos++
 						if s.pos >= s.text.len {
 							s.line_nr--
@@ -1002,7 +1010,7 @@ fn (mut s Scanner) ident_string() string {
 	is_raw := is_quote && s.pos > 0 && s.text[s.pos - 1] == `r`
 	is_cstr := is_quote && s.pos > 0 && s.text[s.pos - 1] == `c`
 	if is_quote {
-		if s.is_inside_string {
+		if s.is_inside_string || s.is_enclosed_inter || s.is_inter_start {
 			s.inter_quote = q
 		} else {
 			s.quote = q
@@ -1162,10 +1170,7 @@ fn (mut s Scanner) ident_char() string {
 [inline]
 fn (s &Scanner) expect(want string, start_pos int) bool {
 	end_pos := start_pos + want.len
-	if start_pos < 0 || start_pos >= s.text.len {
-		return false
-	}
-	if end_pos < 0 || end_pos > s.text.len {
+	if start_pos < 0 || end_pos < 0 || start_pos >= s.text.len || end_pos > s.text.len {
 		return false
 	}
 	for pos in start_pos .. end_pos {
@@ -1265,8 +1270,7 @@ pub fn (mut s Scanner) error(msg string) {
 }
 
 fn (mut s Scanner) vet_error(msg string) {
-	eline := '$s.file_path:$s.line_nr: $msg'
-	s.vet_errors << eline
+	s.vet_errors << '$s.file_path:$s.line_nr: $msg'
 }
 
 pub fn verror(s string) {

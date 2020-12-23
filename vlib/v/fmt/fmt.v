@@ -282,6 +282,7 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 					f.write(', ')
 				}
 			}
+			f.comments(node.end_comments, has_nl: false, inline: true, level: .keep)
 			if !f.single_line_if {
 				f.writeln('')
 			}
@@ -296,8 +297,11 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 			if node.is_unsafe {
 				f.write('unsafe ')
 			}
-			f.writeln('{')
-			f.stmts(node.stmts)
+			f.write('{')
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.writeln('}')
 		}
 		ast.BranchStmt {
@@ -305,36 +309,26 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 		}
 		ast.CompFor {
 			typ := f.no_cur_mod(f.table.type_to_str(node.typ))
-			f.writeln('\$for $node.val_var in ${typ}.$node.kind.str() {')
-			f.stmts(node.stmts)
+			f.write('\$for $node.val_var in ${typ}.$node.kind.str() {')
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.writeln('}')
 		}
 		ast.ConstDecl {
 			f.const_decl(node)
 		}
 		ast.DeferStmt {
-			f.writeln('defer {')
-			f.stmts(node.stmts)
+			f.write('defer {')
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.writeln('}')
 		}
 		ast.EnumDecl {
-			f.attrs(node.attrs)
-			if node.is_pub {
-				f.write('pub ')
-			}
-			name := node.name.after('.')
-			f.writeln('enum $name {')
-			f.comments(node.comments, inline: true, level: .indent)
-			for field in node.fields {
-				f.write('\t$field.name')
-				if field.has_expr {
-					f.write(' = ')
-					f.expr(field.expr)
-				}
-				f.comments(field.comments, inline: true, has_nl: false, level: .indent)
-				f.writeln('')
-			}
-			f.writeln('}\n')
+			f.enum_decl(node)
 		}
 		ast.ExprStmt {
 			f.comments(node.comments, {})
@@ -361,8 +355,11 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 			f.write('; ')
 			f.stmt(node.inc)
 			f.remove_new_line()
-			f.writeln(' {')
-			f.stmts(node.stmts)
+			f.write(' {')
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.writeln('}')
 		}
 		ast.ForInStmt {
@@ -388,8 +385,11 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 				f.write(' .. ')
 				f.expr(node.high)
 			}
-			f.writeln(' {')
-			f.stmts(node.stmts)
+			f.write(' {')
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.writeln('}')
 		}
 		ast.ForStmt {
@@ -399,11 +399,14 @@ pub fn (mut f Fmt) stmt(node ast.Stmt) {
 			f.write('for ')
 			f.expr(node.cond)
 			if node.is_inf {
-				f.writeln('{')
+				f.write('{')
 			} else {
-				f.writeln(' {')
+				f.write(' {')
 			}
-			f.stmts(node.stmts)
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.writeln('}')
 		}
 		ast.GlobalDecl {
@@ -596,6 +599,10 @@ pub fn (mut f Fmt) struct_decl(node ast.StructDecl) {
 		f.write(gtypes)
 		f.write('>')
 	}
+	if node.fields.len == 0 && node.pos.line_nr == node.pos.last_line {
+		f.writeln(' {}\n')
+		return
+	}
 	f.writeln(' {')
 	mut max := 0
 	mut max_type := 0
@@ -614,7 +621,10 @@ pub fn (mut f Fmt) struct_decl(node ast.StructDecl) {
 		if comments_len + field.name.len > max {
 			max = comments_len + field.name.len
 		}
-		ft := f.no_cur_mod(f.table.type_to_str(field.typ))
+		mut ft := f.no_cur_mod(f.table.type_to_str(field.typ))
+		if !ft.starts_with('C.') && !ft.starts_with('JS.') {
+			ft = f.short_module(ft)
+		}
 		field_types << ft
 		if ft.len > max_type {
 			max_type = ft.len
@@ -697,12 +707,39 @@ pub fn (mut f Fmt) interface_decl(node ast.InterfaceDecl) {
 		f.write('pub ')
 	}
 	name := node.name.after('.')
-	f.writeln('interface $name {')
+	f.write('interface $name {')
+	if node.methods.len > 0 || node.pos.line_nr < node.pos.last_line {
+		f.writeln('')
+	}
 	f.comments_after_last_field(node.pre_comments)
 	for method in node.methods {
 		f.write('\t')
-		f.write(method.stringify(f.table, f.cur_mod).after('fn '))
+		f.write(method.stringify(f.table, f.cur_mod, f.mod2alias).after('fn '))
 		f.comments(method.comments, inline: true, has_nl: false, level: .indent)
+		f.writeln('')
+	}
+	f.writeln('}\n')
+}
+
+pub fn (mut f Fmt) enum_decl(node ast.EnumDecl) {
+	f.attrs(node.attrs)
+	if node.is_pub {
+		f.write('pub ')
+	}
+	name := node.name.after('.')
+	if node.fields.len == 0 && node.pos.line_nr == node.pos.last_line {
+		f.writeln('enum $name {}\n')
+		return
+	}
+	f.writeln('enum $name {')
+	f.comments(node.comments, inline: true, level: .indent)
+	for field in node.fields {
+		f.write('\t$field.name')
+		if field.has_expr {
+			f.write(' = ')
+			f.expr(field.expr)
+		}
+		f.comments(field.comments, inline: true, has_nl: false, level: .indent)
 		f.writeln('')
 	}
 	f.writeln('}\n')
@@ -1200,16 +1237,19 @@ pub fn (mut f Fmt) comment(node ast.Comment, options CommentsOptions) {
 	if !node.text.contains('\n') {
 		is_separate_line := !options.inline || node.text.starts_with('\x01')
 		mut s := if node.text.starts_with('\x01') { node.text[1..] } else { node.text }
-		if s == '' {
-			s = '//'
-		} else {
-			s = '// ' + s
+		mut out_s := '//'
+		if s != '' {
+			match s[0] {
+				`a`...`z`, `A`...`Z`, `0`...`9` { out_s += ' ' }
+				else {}
+			}
+			out_s += s
 		}
 		if !is_separate_line && f.indent > 0 {
 			f.remove_new_line() // delete the generated \n
 			f.write(' ')
 		}
-		f.write(s)
+		f.write(out_s)
 		return
 	}
 	lines := node.text.split_into_lines()
@@ -1244,11 +1284,14 @@ pub fn (mut f Fmt) fn_decl(node ast.FnDecl) {
 	// println('$it.name find_comment($it.pos.line_nr)')
 	// f.find_comment(it.pos.line_nr)
 	f.attrs(node.attrs)
-	f.write(node.stringify(f.table, f.cur_mod)) // `Expr` instead of `ast.Expr` in mod ast
+	f.write(node.stringify(f.table, f.cur_mod, f.mod2alias)) // `Expr` instead of `ast.Expr` in mod ast
 	if node.language == .v {
 		if !node.no_body {
-			f.writeln(' {')
-			f.stmts(node.stmts)
+			f.write(' {')
+			if node.stmts.len > 0 || node.pos.line_nr < node.pos.last_line {
+				f.writeln('')
+				f.stmts(node.stmts)
+			}
 			f.write('}')
 		}
 		if !node.is_anon {
@@ -1289,13 +1332,13 @@ pub fn (mut f Fmt) short_module(name string) string {
 	if vals.len < 2 {
 		return name
 	}
-	mname := vals[vals.len - 2]
+	mname, tprefix := f.get_modname_prefix(vals[vals.len - 2])
 	symname := vals[vals.len - 1]
 	aname := f.mod2alias[mname]
 	if aname == '' {
 		return symname
 	}
-	return '${aname}.$symname'
+	return '$tprefix${aname}.$symname'
 }
 
 pub fn (mut f Fmt) lock_expr(lex ast.LockExpr) {
@@ -1495,6 +1538,8 @@ pub fn (mut f Fmt) call_expr(node ast.CallExpr) {
 		f.write_language_prefix(node.language)
 		if node.left is ast.AnonFn {
 			f.fn_decl(node.left.decl)
+		} else if node.language != .v {
+			f.write('${node.name.after_char(`.`)}')
 		} else {
 			mut name := f.short_module(node.name)
 			f.mark_module_as_used(name)
@@ -1857,15 +1902,17 @@ pub fn (mut f Fmt) struct_init(it ast.StructInit) {
 		}
 		f.comments(it.pre_comments, inline: true, has_nl: true, level: .indent)
 		f.indent++
-		single_line_short_args := use_short_args && it.fields.len < 4
-		if use_short_args && !single_line_short_args {
-			f.writeln('')
-		}
+		mut short_args_multiline := false
+		mut field_start_positions := []int{}
 		for i, field in it.fields {
+			field_start_positions << f.out.len
 			f.write('$field.name: ')
 			f.prefix_expr_cast_expr(field.expr)
+			if field.expr is ast.StructInit {
+				short_args_multiline = true
+			}
 			f.comments(field.comments, inline: true, has_nl: false, level: .indent)
-			if single_line_short_args {
+			if use_short_args {
 				if i < it.fields.len - 1 {
 					f.write(', ')
 				}
@@ -1873,6 +1920,18 @@ pub fn (mut f Fmt) struct_init(it ast.StructInit) {
 				f.writeln('')
 			}
 			f.comments(field.next_comments, inline: false, has_nl: true, level: .keep)
+		}
+		if use_short_args {
+			if f.line_len > max_len[3] || short_args_multiline {
+				mut fields := []string{}
+				for pos in field_start_positions.reverse() {
+					fields << f.out.cut_last(f.out.len - pos).trim_suffix(', ')
+				}
+				f.writeln('')
+				for field in fields.reverse() {
+					f.writeln(field)
+				}
+			}
 		}
 		f.indent--
 		if !use_short_args {
@@ -1884,6 +1943,10 @@ pub fn (mut f Fmt) struct_init(it ast.StructInit) {
 pub fn (mut f Fmt) const_decl(it ast.ConstDecl) {
 	if it.is_pub {
 		f.write('pub ')
+	}
+	if it.fields.len == 0 && it.pos.line_nr == it.pos.last_line {
+		f.writeln('const ()\n')
+		return
 	}
 	f.writeln('const (')
 	mut max := 0
@@ -1971,4 +2034,15 @@ fn (mut f Fmt) is_external_name(name string) bool {
 		return true
 	}
 	return false
+}
+
+fn (f Fmt) get_modname_prefix(mname string) (string, string) {
+	// ./tests/proto_module_importing_vproto_keep.vv to know, why here is checked for ']' and '&'
+	if !mname.contains(']') && !mname.contains('&') {
+		return mname, ''
+	}
+	after_rbc := mname.all_after_last(']')
+	after_ref := mname.all_after_last('&')
+	modname := if after_rbc.len < after_ref.len { after_rbc } else { after_ref }
+	return modname, mname.trim_suffix(modname)
 }

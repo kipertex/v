@@ -35,9 +35,10 @@ enum HighlightTokenTyp {
 }
 
 const (
-	css_js_assets   = ['doc.css', 'normalize.css', 'doc.js']
+	css_js_assets   = ['doc.css', 'normalize.css', 'doc.js', 'dark-mode.js']
 	allowed_formats = ['md', 'markdown', 'json', 'text', 'stdout', 'html', 'htm']
 	res_path        = os.resource_abs_path('vdoc-resources')
+	favicons_path   = os.join_path(res_path, 'favicons')
 	vexe            = pref.vexe_path()
 	vroot           = os.dir(vexe)
 	html_content    = '
@@ -49,6 +50,13 @@ const (
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
 		<title>{{ title }} | vdoc</title>
 		<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+		<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+		<link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+		<link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+		<link rel="manifest" href="site.webmanifest">
+		<link rel="mask-icon" href="safari-pinned-tab.svg" color="#5bbad5">
+		<meta name="msapplication-TileColor" content="#da532c">
+		<meta name="theme-color" content="#ffffff">
 		{{ head_assets }}
 	</head>
 	<body>
@@ -487,11 +495,12 @@ fn (cfg DocConfig) gen_html(idx int) string {
 		header_name).replace('{{ version }}', version).replace('{{ light_icon }}', cfg.assets['light_icon']).replace('{{ dark_icon }}',
 		cfg.assets['dark_icon']).replace('{{ menu_icon }}', cfg.assets['menu_icon']).replace('{{ head_assets }}',
 		if cfg.inline_assets {
-		'\n	<style>' + cfg.assets['doc_css'] + '</style>\n    <style>' + cfg.assets['normalize_css'] +
-			'</style>'
+		'\n    <style>' + cfg.assets['doc_css'] + '</style>\n    <style>' + cfg.assets['normalize_css'] +
+			'</style>\n	<script>' + cfg.assets['dark_mode_js'] + '</script>'
 	} else {
-		'\n	<link rel="stylesheet" href="' + cfg.assets['doc_css'] + '" />\n	<link rel="stylesheet" href="' +
-			cfg.assets['normalize_css'] + '" />'
+		'\n    <link rel="stylesheet" href="' + cfg.assets['doc_css'] + '" />\n	<link rel="stylesheet" href="' +
+			cfg.assets['normalize_css'] + '" />\n</style>\n    <script src="' + cfg.assets['dark_mode_js'] +
+			'"></script>'
 	}).replace('{{ toc_links }}', if cfg.is_multi || cfg.docs.len > 1 {
 		modules_toc_str
 	} else {
@@ -649,6 +658,7 @@ fn (mut cfg DocConfig) render_static() {
 		'doc_css':       cfg.get_resource(css_js_assets[0], true)
 		'normalize_css': cfg.get_resource(css_js_assets[1], true)
 		'doc_js':        cfg.get_resource(css_js_assets[2], !cfg.serve_http)
+		'dark_mode_js':  cfg.get_resource(css_js_assets[3], !cfg.serve_http)
 		'light_icon':    cfg.get_resource('light.svg', true)
 		'dark_icon':     cfg.get_resource('dark.svg', true)
 		'menu_icon':     cfg.get_resource('menu.svg', true)
@@ -811,6 +821,14 @@ fn (mut cfg DocConfig) generate_docs_from_file() {
 		}
 		cfg.render_static()
 		cfg.render_parallel()
+		// move favicons to target directory
+		println('Copying favicons...')
+		favicons := os.ls(favicons_path) or { panic(err) }
+		for favicon in favicons {
+			favicon_path := os.join_path(favicons_path, favicon)
+			destination_path := os.join_path(cfg.output_path, favicon)
+			os.cp(favicon_path, destination_path)
+		}
 	}
 }
 
@@ -970,7 +988,7 @@ fn main() {
 				i++
 			}
 			'-p' {
-				s_port := cmdline.option(current_args, '-o', '')
+				s_port := cmdline.option(current_args, '-p', '')
 				s_port_int := s_port.int()
 				if s_port.len == 0 {
 					eprintln('vdoc: No port number specified on "-p".')
@@ -981,6 +999,7 @@ fn main() {
 					exit(1)
 				}
 				cfg.server_port = s_port_int
+				i++
 			}
 			'-s' {
 				cfg.inline_assets = true

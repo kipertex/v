@@ -14,6 +14,10 @@ pub fn (mut p Parser) parse_array_type() table.Type {
 		p.next()
 		p.check(.rsbr)
 		elem_type := p.parse_type()
+		if elem_type.idx() == 0 {
+			// error is handled by parse_type
+			return 0
+		}
 		// sym := p.table.get_type_symbol(elem_type)
 		idx := p.table.find_or_register_array_fixed(elem_type, size, 1)
 		return table.new_type(idx)
@@ -44,6 +48,10 @@ pub fn (mut p Parser) parse_map_type() table.Type {
 	}
 	p.check(.lsbr)
 	key_type := p.parse_type()
+	if key_type.idx() == 0 {
+		// error is reported in parse_type
+		return 0
+	}
 	// key_type_sym := p.get_type_symbol(key_type)
 	// if key_type_sym.kind != .string {
 	if key_type.idx() != table.string_type_idx {
@@ -52,6 +60,10 @@ pub fn (mut p Parser) parse_map_type() table.Type {
 	}
 	p.check(.rsbr)
 	value_type := p.parse_type()
+	if value_type.idx() == 0 {
+		// error is reported in parse_type
+		return 0
+	}
 	idx := p.table.find_or_register_map(key_type, value_type)
 	return table.new_type(idx)
 }
@@ -72,8 +84,11 @@ pub fn (mut p Parser) parse_chan_type() table.Type {
 pub fn (mut p Parser) parse_multi_return_type() table.Type {
 	p.check(.lpar)
 	mut mr_types := []table.Type{}
-	for {
+	for p.tok.kind != .eof {
 		mr_type := p.parse_type()
+		if mr_type.idx() == 0 {
+			break
+		}
 		mr_types << mr_type
 		if p.tok.kind == .comma {
 			p.next()
@@ -219,7 +234,7 @@ pub fn (mut p Parser) parse_any_type(language table.Language, is_ptr bool, check
 		p.check(.dot)
 		// prefix with full module
 		name = '${p.imports[name]}.$p.tok.lit'
-		if !p.tok.lit[0].is_capital() {
+		if p.tok.lit.len > 0 && !p.tok.lit[0].is_capital() {
 			p.error('imported types must start with a capital letter')
 			return 0
 		}
@@ -365,14 +380,14 @@ pub fn (mut p Parser) parse_generic_struct_inst_type(name string) table.Type {
 	bs_cname += '_T_'
 	mut generic_types := []table.Type{}
 	mut is_instance := false
-	for {
+	for p.tok.kind != .eof {
 		gt := p.parse_type()
 		if !gt.has_flag(.generic) {
 			is_instance = true
 		}
 		gts := p.table.get_type_symbol(gt)
 		bs_name += gts.name
-		bs_cname += gts.name
+		bs_cname += gts.cname
 		generic_types << gt
 		if p.tok.kind != .comma {
 			break

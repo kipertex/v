@@ -21,6 +21,10 @@ match_test_suite = [
 	TestItem{"b",r"b|a",0,1},
 	TestItem{"c",r"b|a",-1,0},
 
+	// test base
+	TestItem{"[ciao]",r"(.)ciao(.)",0,6},
+	TestItem{"[ciao] da me",r"(.)ciao(.)",0,6},
+
 	// positive
 	TestItem{"this is a good.",r"this",0,4},
 	TestItem{"this is a good.",r"good",10,14},
@@ -112,6 +116,31 @@ match_test_suite = [
 	TestItem{"poth", r".(oth)|(eth)$",0,4},
 	TestItem{"poth", r"^.(oth)|(eth)$",0,4},
 	TestItem{"poth", r"^\w+$",0,4},
+
+	// test dot_char
+	TestItem{"8-11 l: qllllqllklhlvtl", r"^(\d+)-(\d+) ([a-z]): (.*)$",0,23},
+	TestItem{"accccb deer", r"^a(.*)b d(.+)r",0,11},
+	TestItem{"accccb deer", r"^a(.*)b d(.+)",0,11},
+	TestItem{"accccb deer", r"^(.*)$",0,11},
+	TestItem{"accccb deer", r"^a(.*)b d(.+)p",-1,0},
+
+	// test bcksls chars
+	TestItem{"[ an s. s! ]( wi4ki:something )", r"\[.*\]\( *(\w*:*\w+) *\)",0,31},
+	TestItem{"[ an s. s! ](wiki:something)", r"\[.*\]\( *(\w*:*\w+) *\)",0,28},
+	
+	// Crazywulf tests (?:^|[()])(\d+)(*)(\d+)(?:$|[()])
+    TestItem{"1*1", r"(\d+)([*])(\d+)",0,3},
+    TestItem{"+1*1", r"^(\d+)([*])(\d+)",-1,0},
+    TestItem{"*1*1", r"(?:^|[*])(\d+)([*])(\d+)",0,4},
+    TestItem{"*1*1", r"(?:^|[*()])(\d+)([*])(\d+)",0,4},
+    TestItem{")1*1", r"(?:^|[*()])(\d+)([*])(\d+)",0,4},
+    TestItem{"(1*1", r"(?:^|[*()])(\d+)([*])(\d+)",0,4},
+    TestItem{"*1*1(", r"(?:^|[*()])(\d+)([*])(\d+)(?:$|[*()])",0,5},
+    TestItem{" 1*1(", r"(?:^|[*()])(\d+)([*])(\d+)(?:$|[*()])",-1,0},
+    TestItem{"1*1 ", r"(?:^|[*()])(\d+)([*])(\d+)(?:$|[*()])",-1,0},
+
+    // particular groups
+    TestItem{"ababababac", r"ab(.*)(ac)",0,10},
 ]
 )
 
@@ -167,7 +196,7 @@ struct TestItemCGroup {
 	q string
 	s int
 	e int
-	cg []int
+	cg []int // [number of items (3*# item), id_group_0, start_0, end_0, id_group_1, start1, start2,... ]
 	cgn map[string]int
 }
 const (
@@ -181,7 +210,8 @@ cgroups_test_suite = [
 	TestItemCGroup{
 		"http://www.ciao.mondo/hello/pippo12_/pera.html",
 		r"(?P<format>https?)|(?P<format>ftps?)://(?P<token>[\w_]+.)+",0,46,
-		[2, 0, 0, 4, 1, 7, 10],
+		[8, 0, 0, 4, 1, 7, 11, 1, 11, 16, 1, 16, 22, 1, 22, 28, 1, 28, 37, 1, 37, 42, 1, 42, 46]
+		//[8, 0, 0, 4, 1, 7, 10, 1, 11, 15, 1, 16, 21, 1, 22, 27, 1, 28, 36, 1, 37, 41, 1, 42, 46],		
 		{'format':int(0),'token':1}
 	},
 	TestItemCGroup{
@@ -200,6 +230,12 @@ cgroups_test_suite = [
 		"acc +13",
 		r"(\w+)\s(.)([0-9]+)",0,7,
 		[0, 3, 4, 5, 5, 7],
+		map[string]int{}
+	},
+	TestItemCGroup{
+		"ababababac",
+		r"ab(.*)(ac)",0,10,
+		[2, 8, 8, 10],
 		map[string]int{}
 	},
 ]
@@ -223,7 +259,8 @@ fn test_regex(){
 		}
 
 		if to.cgn.len > 0 {
-			re.group_csave = [-1].repeat(3*20+1)
+			re.group_csave_flag = true
+			//re.group_csave = [-1].repeat(3*20+1)
 			if debug { println("continuous save")}
 		} else {
 			if debug { println("NO continuous save")}
@@ -247,7 +284,7 @@ fn test_regex(){
 		// check cgroups
 		if to.cgn.len > 0 {
 			if re.group_csave.len == 0 || re.group_csave[0] != to.cg[0] {
-				println("Capturing group len error! ${re.group_csave[0]}")
+				println("Capturing group len error! found: ${re.group_csave[0]} true ground: ${to.cg[0]}")
 				assert false
 				continue
 			}
@@ -256,6 +293,7 @@ fn test_regex(){
 			mut ln := re.group_csave[0]*3
 			for ln > 0 {
 				if re.group_csave[ln] != to.cg[ln] {
+					println("Capturing group failed on $ln item!")
 					assert false
 				}
 				ln--

@@ -7,7 +7,7 @@ V is a statically typed compiled programming language designed for building main
 It's similar to Go and its design has also been influenced by Oberon, Rust, Swift,
 Kotlin, and Python.
 
-V is a very simple language. Going through this documentation will take you about half an hour,
+V is a very simple language. Going through this documentation will take you about an hour,
 and by the end of it you will have pretty much learned the entire language.
 
 The language promotes writing simple and clear code with minimal abstraction.
@@ -84,7 +84,7 @@ Anything you can do in other languages, you can do in V.
     * [Compile-time reflection](#compile-time-reflection)
     * [Limited operator overloading](#limited-operator-overloading)
     * [Inline assembly](#inline-assembly)
-    * [Translating C/C++ to V](#translating-cc-to-v)
+    * [Translating C to V](#translating-c-to-v)
     * [Hot code reloading](#hot-code-reloading)
     * [Cross compilation](#cross-compilation)
     * [Cross-platform shell scripts in V](#cross-platform-shell-scripts-in-v)
@@ -129,9 +129,9 @@ See `v help` for all supported commands.
 
 From the example above, you can see that functions are declared with the `fn` keyword.
 The return type is specified after the function name.
-In this case `main` doesn't return anything, so the return type can be omitted.
+In this case `main` doesn't return anything, so there is no return type.
 
-As in many other languages (such as C, Go and Rust), `main` is the entry point of your program.
+As in many other languages (such as C, Go, and Rust), `main` is the entry point of your program.
 
 `println` is one of the few built-in functions.
 It prints the value passed to it to standard output.
@@ -534,8 +534,7 @@ The type of an array is determined by the first element:
 * `[1, 2, 3]` is an array of ints (`[]int`).
 * `['a', 'b']` is an array of strings (`[]string`).
 
-If V is unable to infer the type of an array,
-the user can explicitly specify it for the first element: `[byte(16), 32, 64, 128]`.
+The user can explicitly specify the type for the first element: `[byte(16), 32, 64, 128]`.
 V arrays are homogeneous (all elements must have the same type).
 This means that code like `[1, 'a']` will not compile.
 
@@ -594,6 +593,13 @@ Note: The above code uses a [range `for`](#range-for) statement.
 
 All arrays can be easily printed with `println(arr)` and converted to a string
 with `s := arr.str()`.
+
+Copying the data from the array is done with `.clone()`:
+
+```v nofmt
+nums := [1, 2, 3]
+nums_copy := nums.clone()
+```
 
 Arrays can be efficiently filtered and mapped with the `.filter()` and
 `.map()` methods:
@@ -1503,8 +1509,7 @@ fn main() {
 ## References
 
 ```v
-struct Foo {
-}
+struct Foo {}
 
 fn (foo Foo) bar_method() {
 	// ...
@@ -1724,8 +1729,7 @@ struct Dog {
 	breed string
 }
 
-struct Cat {
-}
+struct Cat {}
 
 fn (d Dog) speak() string {
 	return 'woof'
@@ -1794,14 +1798,11 @@ A sum type instance can hold a value of several different types. Use the `type`
 keyword to declare a sum type:
 
 ```v
-struct Moon {
-}
+struct Moon {}
 
-struct Mars {
-}
+struct Mars {}
 
-struct Venus {
-}
+struct Venus {}
 
 type World = Mars | Moon | Venus
 
@@ -1818,14 +1819,11 @@ To check whether a sum type instance holds a certain type, use `sum is Type`.
 To cast a sum type to one of its variants you can use `sum as Type`:
 
 ```v
-struct Moon {
-}
+struct Moon {}
 
-struct Mars {
-}
+struct Mars {}
 
-struct Venus {
-}
+struct Venus {}
 
 type World = Mars | Moon | Venus
 
@@ -1877,14 +1875,11 @@ complex expression than just a variable name.
 You can also use `match` to determine the variant:
 
 ```v
-struct Moon {
-}
+struct Moon {}
 
-struct Mars {
-}
+struct Mars {}
 
-struct Venus {
-}
+struct Venus {}
 
 type World = Mars | Moon | Venus
 
@@ -2475,11 +2470,24 @@ option to see more details about the individual tests run.
 
 ## Memory management
 
-(Work in progress)
+V avoids doing unnecessary allocations in the first place by using value types,
+string buffers, promoting a simple abstraction-free code style.
 
-V doesn't use garbage collection or reference counting. The compiler cleans everything up
-during compilation. If your V program compiles, it's guaranteed that it's going
-to be leak free. For example:
+Most objects (~90-100%) are freed by V's autofree engine: the compiler inserts
+necessary free calls automatically during compilation. Remaining small percentage
+of objects is freed via reference counting.
+
+The developer doesn't need to change anything in their code. "It just works", like in
+Python, Go, or Java, except there's no heavy GC tracing everything or expensive RC for
+each object.
+
+For developers willing to have more low level control, autofree can be disabled with
+`-noautofree`.
+
+Note: right now autofree is hidden behind the -autofree flag. It will be enabled by
+default in V 0.3.
+
+For example:
 
 ```v
 import strings
@@ -2714,7 +2722,7 @@ fn C.sqlite3_close(&C.sqlite3) int
 
 fn C.sqlite3_column_int(stmt &C.sqlite3_stmt, n int) int
 
-// ... you can also just define the type of parameter & leave out the C. prefix
+// ... you can also just define the type of parameter and leave out the C. prefix
 fn C.sqlite3_prepare_v2(&sqlite3, charptr, int, &&sqlite3_stmt, &charptr) int
 
 fn C.sqlite3_step(&sqlite3_stmt)
@@ -2726,8 +2734,10 @@ fn C.sqlite3_exec(db &sqlite3, sql charptr, FnSqlite3Callback voidptr, cb_arg vo
 fn C.sqlite3_free(voidptr)
 
 fn my_callback(arg voidptr, howmany int, cvalues &charptr, cnames &charptr) int {
-	for i in 0 .. howmany {
-		print('| ${cstring_to_vstring(cnames[i])}: ${cstring_to_vstring(cvalues[i]):20} ')
+	unsafe {
+		for i in 0 .. howmany {
+			print('| ${cstring_to_vstring(cnames[i])}: ${cstring_to_vstring(cvalues[i]):20} ')
+		}
 	}
 	println('|')
 	return 0
@@ -2738,9 +2748,10 @@ fn main() {
 	// passing a string literal to a C function call results in a C string, not a V string
 	C.sqlite3_open('users.db', &db)
 	// C.sqlite3_open(db_path.str, &db)
-	// you can also use `.str byteptr` field to convert a V string to a C char pointer
 	query := 'select count(*) from users'
 	stmt := &C.sqlite3_stmt(0)
+	// NB: you can also use the `.str` field of a V string,
+	// to get its C style zero terminated representation
 	C.sqlite3_prepare_v2(db, query.str, -1, &stmt, 0)
 	C.sqlite3_step(stmt)
 	nr_users := C.sqlite3_column_int(stmt, 0)
@@ -2848,11 +2859,12 @@ For example: `-cc gcc-9 -cflags -fsanitize=thread`.
 
 ### C types
 
-Ordinary zero terminated C strings can be converted to V strings with `string(cstring)`
-or `string(cstring, len)`.
+Ordinary zero terminated C strings can be converted to V strings with
+`unsafe { charptr(cstring).vstring() }` or if you know their length already with
+`unsafe { charptr(cstring).vstring_with_len(len) }`.
 
-NB: Each `string(...)` function does NOT create a copy of the `cstring`,
-so you should NOT free it after calling `string()`.
+NB: The .vstring() and .vstring_with_len() methods do NOT create a copy of the `cstring`,
+so you should NOT free it after calling the method `.vstring()`.
 If you need to make a copy of the C string (some libc APIs like `getenv` pretty much require that,
 since they return pointers to internal libc memory), you can use `cstring_to_vstring(cstring)`.
 
@@ -3051,11 +3063,11 @@ fn (a Vec) str() string {
 	return '{$a.x, $a.y}'
 }
 
-fn (a Vec) +(b Vec) Vec {
+fn (a Vec) + (b Vec) Vec {
 	return Vec{a.x + b.x, a.y + b.y}
 }
 
-fn (a Vec) -(b Vec) Vec {
+fn (a Vec) - (b Vec) Vec {
 	return Vec{a.x - b.x, a.y - b.y}
 }
 
@@ -3095,39 +3107,49 @@ fn main() {
 }
 ```
 
-## Translating C/C++ to V
+## Translating C to V
 
-TODO: translating C to V will be available in V 0.3. C++ to V will be available later this year.
+TODO: translating C to V will be available in V 0.3.
 
-V can translate your C/C++ code to human readable V code.
-Let's create a simple program `test.cpp` first:
+V can translate your C code to human readable V code and generate V wrappers on top of C libraries.
 
-```cpp
-#include <vector>
-#include <string>
-#include <iostream>
+
+Let's create a simple program `test.c` first:
+
+```c
+#include "stdio.h"
 
 int main() {
-        std::vector<std::string> s;
-        s.push_back("V is ");
-        s.push_back("awesome");
-        std::cout << s.size() << std::endl;
+	for (int i = 0; i < 10; i++) {
+		printf("hello world\n");
+	}
         return 0;
 }
 ```
 
-Run `v translate test.cpp` and V will generate `test.v`:
+Run `v translate test.c`, and V will generate `test.v`:
 
 ```v
 fn main() {
-	mut s := []string{}
-	s << 'V is '
-	s << 'awesome'
-	println(s.len)
+	for i := 0; i < 10; i++ {
+		println('hello world')
+	}
 }
 ```
 
-An online C/C++ to V translator is coming soon.
+To generate a wrapper on top of a C library use this command:
+
+```bash
+v wrapper c_code/libsodium/src/libsodium
+```
+
+This will generate a directory `libsodium` with a V module.
+
+Example of a C2V generated libsodium wrapper:
+
+https://github.com/medvednikov/libsodium
+
+<br>
 
 When should you translate C code and when should you simply call C code from V?
 

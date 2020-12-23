@@ -9,12 +9,13 @@ import v.pref
 import v.vmod
 
 pub const (
-	v_version = '0.1.30'
+	v_version = '0.2'
 )
 
 // math.bits is needed by strconv.ftoa
 pub const (
 	builtin_module_parts = ['math.bits', 'strconv', 'strconv.ftoa', 'hash', 'strings', 'builtin']
+	bundle_modules       = ['clipboard', 'fontstash', 'gg', 'gx', 'sokol', 'ui']
 )
 
 pub const (
@@ -407,4 +408,8 @@ pub fn recompile_file(vexe string, file string) {
 		eprintln('could not recompile $file')
 		exit(2)
 	}
+}
+
+pub fn should_bundle_module(mod string) bool {
+	return mod in bundle_modules || (mod.contains('.') && mod.all_before('.') in bundle_modules)
 }

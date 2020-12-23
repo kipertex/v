@@ -13,6 +13,7 @@ import time
 
 pub const (
 	methods_with_form       = [http.Method.post, .put, .patch]
+	methods_without_first   = ['ost', 'ut', 'et', 'atch', 'ptions', 'elete', 'ead'] // needed for method checking as method parameter
 	header_server           = 'Server: VWeb\r\n'
 	header_connection_close = 'Connection: close\r\n'
 	headers_close           = '$header_server$header_connection_close\r\n'
@@ -285,7 +286,7 @@ fn handle_conn<T>(mut conn net.TcpConn, mut app T) {
 			//}
 
 			// read body
-			read_body := io.read_all(reader) or { []byte{} }
+			read_body := io.read_all(reader: reader) or { []byte{} }
 			body += read_body.bytestr()
 
 			break
@@ -399,6 +400,7 @@ fn handle_conn<T>(mut conn net.TcpConn, mut app T) {
 			} else {
 				// Get methods
 				// Get is default
+				mut req_method_str := '$req.method'
 				if req.method == .post {
 					if 'post' in attrs {
 						route_words_a = attrs.filter(it.to_lower() != 'post').map(it[1..].split('/'))
@@ -426,10 +428,19 @@ fn handle_conn<T>(mut conn net.TcpConn, mut app T) {
 				} else {
 					route_words_a = attrs.filter(it.to_lower() != 'get').map(it[1..].split('/'))
 				}
+				mut req_method := []string{}
 				if route_words_a.len > 0 {
 					for route_words in route_words_a {
+						if route_words[0] in methods_without_first && route_words.len == 1 {
+							req_method << route_words[0]
+						}
 						if url_words.len == route_words.len ||
 							(url_words.len >= route_words.len - 1 && route_words.last().ends_with('...')) {
+							if req_method.len > 0 {
+								if req_method_str.to_lower()[1..] !in req_method {
+									continue
+								}
+							}
 							// match `/:user/:repo/tree` to `/vlang/v/tree`
 							mut matching := false
 							mut unknown := false
@@ -469,8 +480,9 @@ fn handle_conn<T>(mut conn net.TcpConn, mut app T) {
 							} else if matching && unknown {
 								// router words with paramter like `/:test/site`
 								action = method.name
-								vars = variables
+								vars = variables.clone()
 							}
+							req_method = []string{}
 						}
 					}
 				}
@@ -536,14 +548,15 @@ fn (mut ctx Context) scan_static_directory(directory_path string, mount_path str
 	}
 	if files.len > 0 {
 		for file in files {
-			if os.is_dir(file) {
-				ctx.scan_static_directory(directory_path + '/' + file, mount_path + '/' + file)
+			full_path := directory_path + '/' + file
+			if os.is_dir(full_path) {
+				ctx.scan_static_directory(full_path, mount_path + '/' + file)
 			} else if file.contains('.') && !file.starts_with('.') && !file.ends_with('.') {
 				ext := os.file_ext(file)
 				// Rudimentary guard against adding files not in mime_types.
 				// Use serve_static directly to add non-standard mime types.
 				if ext in mime_types {
-					ctx.serve_static(mount_path + '/' + file, directory_path + '/' + file,
+					ctx.serve_static(mount_path + '/' + file, full_path,
 						mime_types[ext])
 				}
 			}

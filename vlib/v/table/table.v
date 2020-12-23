@@ -120,7 +120,9 @@ pub fn (t &Table) fn_type_source_signature(f &Fn) string {
 		}
 	}
 	sig += ')'
-	if f.return_type != void_type {
+	if f.return_type == ovoid_type {
+		sig += ' ?'
+	} else if f.return_type != void_type {
 		return_type_sym := t.get_type_symbol(f.return_type)
 		sig += ' $return_type_sym.name'
 	}
@@ -678,8 +680,9 @@ pub fn (t &Table) mktyp(typ Type) Type {
 	}
 }
 
-// Once we have a module format we can read from module file instead
-// this is not optimal
+// TODO: Once we have a module format we can read from module file instead
+// this is not optimal. it depends on the full import being in table.imports
+// already, we can instead lookup the module path and then work it out
 pub fn (table &Table) qualify_module(mod string, file_path string) string {
 	for m in table.imports {
 		// if m.contains('gen') { println('qm=$m') }

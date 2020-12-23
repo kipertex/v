@@ -235,6 +235,7 @@ pub fn (mut p Parser) expr(precedence int) ast.Expr {
 						left: node
 						args: args
 						pos: pos
+						scope: p.scope
 					}
 				}
 				return node
@@ -243,7 +244,7 @@ pub fn (mut p Parser) expr(precedence int) ast.Expr {
 		else {
 			if p.tok.kind != .eof {
 				// eof should be handled where it happens
-				p.error_with_pos('invalid expression: unexpected $p.tok.kind.str() token',
+				p.error_with_pos('invalid expression: unexpected `$p.tok.kind.str()` token',
 					p.tok.position())
 				return ast.Expr{}
 			}
@@ -258,10 +259,26 @@ pub fn (mut p Parser) expr_with_left(left ast.Expr, precedence int, is_stmt_iden
 	for precedence < p.tok.precedence() {
 		if p.tok.kind == .dot {
 			node = p.dot_expr(node)
+			if p.name_error {
+				return node
+			}
 			p.is_stmt_ident = is_stmt_ident
 		} else if p.tok.kind == .lsbr {
 			node = p.index_expr(node)
 			p.is_stmt_ident = is_stmt_ident
+			if p.tok.kind == .lpar && p.tok.line_nr == p.prev_tok.line_nr && node is ast.IndexExpr {
+				p.next()
+				pos := p.tok.position()
+				args := p.call_args()
+				p.check(.rpar)
+				node = ast.CallExpr{
+					left: node
+					args: args
+					pos: pos
+					scope: p.scope
+				}
+				p.is_stmt_ident = is_stmt_ident
+			}
 		} else if p.tok.kind == .key_as {
 			// sum type as cast `x := SumType as Variant`
 			pos := p.tok.position()
@@ -357,6 +374,7 @@ fn (mut p Parser) prefix_expr() ast.PrefixExpr {
 		p.is_amp = true
 	}
 	if op == .arrow {
+		p.or_is_handled = true
 		p.register_auto_import('sync')
 	}
 	// if op == .mul && !p.inside_unsafe {
@@ -397,6 +415,7 @@ fn (mut p Parser) prefix_expr() ast.PrefixExpr {
 			p.next()
 			or_kind = .propagate
 		}
+		p.or_is_handled = false
 	}
 	return ast.PrefixExpr{
 		op: op

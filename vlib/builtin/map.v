@@ -68,7 +68,7 @@ const (
 	// Maximum load-factor (len / capacity)
 	max_load_factor     = 0.8
 	// Initial highest even index in metas
-	init_cap            = init_capicity - 2
+	init_even_index     = init_capicity - 2
 	// Used for incrementing `extra_metas` when max
 	// probe count is too high, to avoid overflow
 	extra_metas_inc     = 4
@@ -100,7 +100,10 @@ mut:
 	cap         int
 	len         int
 	deletes     u32 // count
-	data        byteptr // array of interspersed key data and value data
+	// array allocated (with `cap` bytes) on first deletion
+	// has non-zero element when key deleted
+	all_deleted &byte
+	data        byteptr // array of interleaved key data and value data
 }
 
 [inline]
@@ -115,6 +118,7 @@ fn new_dense_array(key_bytes int, value_bytes int) DenseArray {
 		cap: cap
 		len: 0
 		deletes: 0
+		all_deleted: 0
 		data: malloc(cap * slot_bytes)
 	}
 }
@@ -132,9 +136,15 @@ fn (d &DenseArray) value(i int) voidptr {
 
 [inline]
 fn (d &DenseArray) has_index(i int) bool {
-	// assume string keys for now
-	pkey := unsafe {&string(d.key(i))}
-	return pkey.str != 0
+	return d.deletes == 0 || unsafe {d.all_deleted[i]} == 0
+}
+
+[inline]
+fn (d &DenseArray) clone_key(dest voidptr, pkey voidptr) {
+	unsafe {
+		s := (*&string(pkey)).clone()
+		C.memcpy(dest, &s, d.key_bytes)
+	}
 }
 
 // Push element to array and return index
@@ -145,12 +155,19 @@ fn (mut d DenseArray) push(key voidptr, value voidptr) int {
 		d.cap += d.cap >> 3
 		unsafe {
 			d.data = v_realloc(d.data, d.slot_bytes * d.cap)
+			if d.deletes != 0 {
+				d.all_deleted = v_realloc(d.all_deleted, d.cap)
+				C.memset(d.all_deleted + d.len, 0, d.cap - d.len)
+			}
 		}
 	}
 	push_index := d.len
 	unsafe {
+		if d.deletes != 0 {
+			d.all_deleted[push_index] = 0
+		}
 		ptr := d.key(push_index)
-		C.memcpy(ptr, key, d.key_bytes)
+		d.clone_key(ptr, key)
 		C.memcpy(byteptr(ptr) + d.key_bytes, value, d.value_bytes)
 	}
 	d.len++
@@ -175,6 +192,8 @@ fn (mut d DenseArray) zeros_to_end() {
 	}
 	free(tmp_buf)
 	d.deletes = 0
+	// TODO: reallocate instead as more deletes are likely
+	free(d.all_deleted)
 	d.len = count
 	d.cap = if count < 8 { 8 } else { count }
 	unsafe {
@@ -183,11 +202,13 @@ fn (mut d DenseArray) zeros_to_end() {
 }
 
 pub struct map {
+	// Number of bytes of a key
+	key_bytes       int
 	// Number of bytes of a value
 	value_bytes     int
 mut:
 	// Highest even index in the hashtable
-	cap             u32
+	even_index      u32
 	// Number of cached hashbits left for rehasing
 	cached_hashbits byte
 	// Used for right-shifting out used hashbits
@@ -206,14 +227,20 @@ pub mut:
 	len             int
 }
 
+// bootstrap
 fn new_map_1(value_bytes int) map {
+	return new_map(int(sizeof(string)), value_bytes)
+}
+
+fn new_map(key_bytes int, value_bytes int) map {
 	metasize := int(sizeof(u32) * (init_capicity + extra_metas_inc))
 	return map{
+		key_bytes: key_bytes
 		value_bytes: value_bytes
-		cap: init_cap
+		even_index: init_even_index
 		cached_hashbits: max_cached_hashbits
 		shift: init_log_capicity
-		key_values: new_dense_array(int(sizeof(string)), value_bytes)
+		key_values: new_dense_array(key_bytes, value_bytes)
 		metas: &u32(vcalloc(metasize))
 		extra_metas: extra_metas_inc
 		len: 0
@@ -221,19 +248,41 @@ fn new_map_1(value_bytes int) map {
 }
 
 fn new_map_init(n int, value_bytes int, keys &string, values voidptr) map {
-	mut out := new_map_1(value_bytes)
-	for i in 0 .. n {
-		unsafe {out.set(keys[i], byteptr(values) + i * value_bytes)}
+	return new_map_init_1(n, int(sizeof(string)), value_bytes, keys, values)
+}
+
+fn new_map_init_1(n int, key_bytes int, value_bytes int, keys voidptr, values voidptr) map {
+	mut out := new_map(key_bytes, value_bytes)
+	// TODO pre-allocate n slots
+	mut pkey := byteptr(keys)
+	mut pval := byteptr(values)
+	for _ in 0 .. n {
+		unsafe {
+			out.set_1(pkey, pval)
+			pkey += key_bytes
+			pval += value_bytes
+		}
 	}
 	return out
 }
 
 [inline]
-fn (m &map) key_to_index(key string) (u32, u32) {
+fn (m &map) keys_eq(a voidptr, b voidptr) bool {
+	// assume string for now
+	return fast_string_eq(*&string(a), *&string(b))
+}
+
+[inline]
+fn (m &map) key_to_index(pkey voidptr) (u32, u32) {
+	key := *&string(pkey)
 	hash := hash.wyhash_c(key.str, u64(key.len), 0)
-	index := hash & m.cap
+	index := hash & m.even_index
 	meta := ((hash >> m.shift) & hash_mask) | probe_inc
 	return u32(index), u32(meta)
+}
+
+fn (m &map) free_key(pkey voidptr) {
+	(*&string(pkey)).free()
 }
 
 [inline]
@@ -278,7 +327,7 @@ fn (mut m map) meta_greater(_index u32, _metas u32, kvi u32) {
 fn (mut m map) ensure_extra_metas(probe_count u32) {
 	if (probe_count << 1) == m.extra_metas {
 		m.extra_metas += extra_metas_inc
-		mem_size := (m.cap + 2 + m.extra_metas)
+		mem_size := (m.even_index + 2 + m.extra_metas)
 		unsafe {
 			x := v_realloc(byteptr(m.metas), int(sizeof(u32) * mem_size))
 			m.metas = &u32(x)
@@ -291,12 +340,16 @@ fn (mut m map) ensure_extra_metas(probe_count u32) {
 	}
 }
 
+// bootstrap
+fn (mut m map) set(key string, value voidptr) {
+	m.set_1(&key, value)
+}
+
 // Insert new element to the map. The element is inserted if its key is
 // not equivalent to the key of any other element already in the container.
 // If the key already exists, its value is changed to the value of the new element.
-fn (mut m map) set(k string, value voidptr) {
-	key := k.clone()
-	load_factor := f32(m.len << 1) / f32(m.cap)
+fn (mut m map) set_1(key voidptr, value voidptr) {
+	load_factor := f32(m.len << 1) / f32(m.even_index)
 	if load_factor > max_load_factor {
 		m.expand()
 	}
@@ -305,10 +358,10 @@ fn (mut m map) set(k string, value voidptr) {
 	// While we might have a match
 	for meta == unsafe {m.metas[index]} {
 		kv_index := int(unsafe {m.metas[index + 1]})
-		pkey := unsafe {&string(m.key_values.key(kv_index))}
-		if fast_string_eq(key, *pkey) {
+		pkey := unsafe {m.key_values.key(kv_index)}
+		if m.keys_eq(key, pkey) {
 			unsafe {
-				pval := pkey + 1 // skip string
+				pval := byteptr(pkey) + m.key_bytes
 				C.memcpy(pval, value, m.value_bytes)
 			}
 			return
@@ -323,8 +376,8 @@ fn (mut m map) set(k string, value voidptr) {
 
 // Doubles the size of the hashmap
 fn (mut m map) expand() {
-	old_cap := m.cap
-	m.cap = ((m.cap + 2) << 1) - 2
+	old_cap := m.even_index
+	m.even_index = ((m.even_index + 2) << 1) - 2
 	// Check if any hashbits are left
 	if m.cached_hashbits == 0 {
 		m.shift += max_cached_hashbits
@@ -342,7 +395,7 @@ fn (mut m map) expand() {
 // Rehashes are performed when the load_factor is going to surpass
 // the max_load_factor in an operation.
 fn (mut m map) rehash() {
-	meta_bytes := sizeof(u32) * (m.cap + 2 + m.extra_metas)
+	meta_bytes := sizeof(u32) * (m.even_index + 2 + m.extra_metas)
 	unsafe {
 		x := v_realloc(byteptr(m.metas), int(meta_bytes))
 		m.metas = &u32(x)
@@ -352,8 +405,8 @@ fn (mut m map) rehash() {
 		if !m.key_values.has_index(i) {
 			continue
 		}
-		pkey := unsafe {&string(m.key_values.key(i))}
-		mut index, mut meta := m.key_to_index(*pkey)
+		pkey := unsafe {m.key_values.key(i)}
+		mut index, mut meta := m.key_to_index(pkey)
 		index, meta = m.meta_less(index, meta)
 		m.meta_greater(index, meta, u32(i))
 	}
@@ -363,7 +416,7 @@ fn (mut m map) rehash() {
 // key completely, it uses the bits cached in `metas`.
 fn (mut m map) cached_rehash(old_cap u32) {
 	old_metas := m.metas
-	metasize := int(sizeof(u32) * (m.cap + 2 + m.extra_metas))
+	metasize := int(sizeof(u32) * (m.even_index + 2 + m.extra_metas))
 	m.metas = &u32(vcalloc(metasize))
 	old_extra_metas := m.extra_metas
 	for i := u32(0); i <= old_cap + old_extra_metas; i += 2 {
@@ -372,8 +425,8 @@ fn (mut m map) cached_rehash(old_cap u32) {
 		}
 		old_meta := unsafe {old_metas[i]}
 		old_probe_count := ((old_meta >> hashbits) - 1) << 1
-		old_index := (i - old_probe_count) & (m.cap >> 1)
-		mut index := (old_index | (old_meta << m.shift)) & m.cap
+		old_index := (i - old_probe_count) & (m.even_index >> 1)
+		mut index := (old_index | (old_meta << m.shift)) & m.even_index
 		mut meta := (old_meta & hash_mask) | probe_inc
 		index, meta = m.meta_less(index, meta)
 		kv_index := unsafe {old_metas[i + 1]}
@@ -382,17 +435,21 @@ fn (mut m map) cached_rehash(old_cap u32) {
 	unsafe {free(old_metas)}
 }
 
+fn (mut m map) get_and_set(key string, zero voidptr) voidptr {
+	return m.get_and_set_1(&key, zero)
+}
+
 // This method is used for assignment operators. If the argument-key
 // does not exist in the map, it's added to the map along with the zero/default value.
 // If the key exists, its respective value is returned.
-fn (mut m map) get_and_set(key string, zero voidptr) voidptr {
+fn (mut m map) get_and_set_1(key voidptr, zero voidptr) voidptr {
 	for {
 		mut index, mut meta := m.key_to_index(key)
 		for {
 			if meta == unsafe {m.metas[index]} {
 				kv_index := int(unsafe {m.metas[index + 1]})
-				pkey := unsafe {&string(m.key_values.key(kv_index))}
-				if fast_string_eq(key, *pkey) {
+				pkey := unsafe {m.key_values.key(kv_index)}
+				if m.keys_eq(key, pkey) {
 					return unsafe {byteptr(pkey) + m.key_values.key_bytes}
 				}
 			}
@@ -403,22 +460,26 @@ fn (mut m map) get_and_set(key string, zero voidptr) voidptr {
 			}
 		}
 		// Key not found, insert key with zero-value
-		m.set(key, zero)
+		m.set_1(key, zero)
 	}
 	assert false
 	return voidptr(0)
 }
 
+fn (m map) get(key string, zero voidptr) voidptr {
+	return m.get_1(&key, zero)
+}
+
 // If `key` matches the key of an element in the container,
 // the method returns a reference to its mapped value.
 // If not, a zero/default value is returned.
-fn (m map) get(key string, zero voidptr) voidptr {
+fn (m &map) get_1(key voidptr, zero voidptr) voidptr {
 	mut index, mut meta := m.key_to_index(key)
 	for {
 		if meta == unsafe {m.metas[index]} {
 			kv_index := int(unsafe {m.metas[index + 1]})
-			pkey := unsafe {&string(m.key_values.key(kv_index))}
-			if fast_string_eq(key, *pkey) {
+			pkey := unsafe {m.key_values.key(kv_index)}
+			if m.keys_eq(key, pkey) {
 				return unsafe {byteptr(pkey) + m.key_values.key_bytes}
 			}
 		}
@@ -431,14 +492,18 @@ fn (m map) get(key string, zero voidptr) voidptr {
 	return zero
 }
 
-// Checks whether a particular key exists in the map.
 fn (m map) exists(key string) bool {
+	return m.exists_1(&key)
+}
+
+// Checks whether a particular key exists in the map.
+fn (m &map) exists_1(key voidptr) bool {
 	mut index, mut meta := m.key_to_index(key)
 	for {
 		if meta == unsafe {m.metas[index]} {
 			kv_index := int(unsafe {m.metas[index + 1]})
-			pkey := unsafe {&string(m.key_values.key(kv_index))}
-			if fast_string_eq(key, *pkey) {
+			pkey := unsafe {m.key_values.key(kv_index)}
+			if m.keys_eq(key, pkey) {
 				return true
 			}
 		}
@@ -451,15 +516,30 @@ fn (m map) exists(key string) bool {
 	return false
 }
 
-// Removes the mapping of a particular key from the map.
+[inline]
+fn (mut d DenseArray) delete(i int) {
+	if d.deletes == 0 {
+		d.all_deleted = vcalloc(d.cap) // sets to 0
+	}
+	d.deletes++
+	unsafe {
+		d.all_deleted[i] = 1
+	}
+}
+
 pub fn (mut m map) delete(key string) {
+	m.delete_1(&key)
+}
+
+// Removes the mapping of a particular key from the map.
+pub fn (mut m map) delete_1(key voidptr) {
 	mut index, mut meta := m.key_to_index(key)
 	index, meta = m.meta_less(index, meta)
 	// Perform backwards shifting
 	for meta == unsafe {m.metas[index]} {
 		kv_index := int(unsafe {m.metas[index + 1]})
-		pkey := unsafe {&string(m.key_values.key(kv_index))}
-		if fast_string_eq(key, *pkey) {
+		pkey := unsafe {m.key_values.key(kv_index)}
+		if m.keys_eq(key, pkey) {
 			for (unsafe {m.metas[index + 2]} >> hashbits) > 1 {
 				unsafe {
 					m.metas[index] = m.metas[index + 2] - probe_inc
@@ -468,14 +548,12 @@ pub fn (mut m map) delete(key string) {
 				index += 2
 			}
 			m.len--
+			m.key_values.delete(kv_index)
 			unsafe {
 				m.metas[index] = 0
-			}
-			m.key_values.deletes++
-			// Mark key as deleted
-			unsafe {
-				(*pkey).free()
-				C.memset(pkey, 0, sizeof(string))
+				m.free_key(pkey)
+				// Mark key as deleted
+				C.memset(pkey, 0, m.key_bytes)
 			}
 			if m.key_values.len <= 32 {
 				return
@@ -484,7 +562,6 @@ pub fn (mut m map) delete(key string) {
 			if m.key_values.deletes >= (m.key_values.len >> 1) {
 				m.key_values.zeros_to_end()
 				m.rehash()
-				m.key_values.deletes = 0
 			}
 			return
 		}
@@ -493,15 +570,34 @@ pub fn (mut m map) delete(key string) {
 	}
 }
 
-// Returns all keys in the map.
+// bootstrap
 pub fn (m &map) keys() []string {
 	mut keys := []string{len: m.len}
-	mut j := 0
+	mut item := unsafe {byteptr(keys.data)}
+	for i := 0; i < m.key_values.len; i++ {
+		if !m.key_values.has_index(i) {
+			continue
+		}
+		unsafe {
+			pkey := m.key_values.key(i)
+			m.key_values.clone_key(item, pkey)
+			item += m.key_bytes
+		}
+	}
+	return keys
+}
+
+// Returns all keys in the map.
+pub fn (m &map) keys_1() array {
+	mut keys := __new_array(m.len, 0, m.key_bytes)
+	mut item := unsafe {byteptr(keys.data)}
 	if m.key_values.deletes == 0 {
 		for i := 0; i < m.key_values.len; i++ {
-			pkey := unsafe {&string(m.key_values.key(i))}
-			keys[j] = pkey.clone()
-			j++
+			unsafe {
+				pkey := m.key_values.key(i)
+				m.key_values.clone_key(item, pkey)
+				item += m.key_bytes
+			}
 		}
 		return keys
 	}
@@ -509,15 +605,17 @@ pub fn (m &map) keys() []string {
 		if !m.key_values.has_index(i) {
 			continue
 		}
-		pkey := unsafe {&string(m.key_values.key(i))}
-		keys[j] = pkey.clone()
-		j++
+		unsafe {
+			pkey := m.key_values.key(i)
+			m.key_values.clone_key(item, pkey)
+			item += m.key_bytes
+		}
 	}
 	return keys
 }
 
 [unsafe]
-pub fn (d DenseArray) clone() DenseArray {
+pub fn (d &DenseArray) clone() DenseArray {
 	res := DenseArray{
 		key_bytes: d.key_bytes
 		value_bytes: d.value_bytes
@@ -525,18 +623,26 @@ pub fn (d DenseArray) clone() DenseArray {
 		cap: d.cap
 		len: d.len
 		deletes: d.deletes
-		data: unsafe {memdup(d.data, d.cap * d.slot_bytes)}
+		all_deleted: 0
+		data: 0
+	}
+	unsafe {
+		if d.deletes != 0 {
+			res.all_deleted = memdup(d.all_deleted, d.cap)
+		}
+		res.data = memdup(d.data, d.cap * d.slot_bytes)
 	}
 	// FIXME clone each key
 	return res
 }
 
 [unsafe]
-pub fn (m map) clone() map {
-	metasize := int(sizeof(u32) * (m.cap + 2 + m.extra_metas))
+pub fn (m &map) clone() map {
+	metasize := int(sizeof(u32) * (m.even_index + 2 + m.extra_metas))
 	res := map{
+		key_bytes: m.key_bytes
 		value_bytes: m.value_bytes
-		cap: m.cap
+		even_index: m.even_index
 		cached_hashbits: m.cached_hashbits
 		shift: m.shift
 		key_values: unsafe {m.key_values.clone()}
@@ -554,8 +660,8 @@ pub fn (m &map) free() {
 	if m.key_values.deletes == 0 {
 		for i := 0; i < m.key_values.len; i++ {
 			unsafe {
-				pkey := &string(m.key_values.key(i))
-				(*pkey).free()
+				pkey := m.key_values.key(i)
+				m.free_key(pkey)
 			}
 		}
 	} else {
@@ -564,10 +670,11 @@ pub fn (m &map) free() {
 				continue
 			}
 			unsafe {
-				pkey := &string(m.key_values.key(i))
-				(*pkey).free()
+				pkey := m.key_values.key(i)
+				m.free_key(pkey)
 			}
 		}
+		unsafe {free(m.key_values.all_deleted)}
 	}
 	unsafe {free(m.key_values.data)}
 }

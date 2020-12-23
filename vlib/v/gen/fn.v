@@ -113,7 +113,8 @@ fn (mut g Gen) gen_fn_decl(it ast.FnDecl, skip bool) {
 	arg_start_pos := g.out.len
 	fargs, fargtypes := g.fn_args(it.params, it.is_variadic)
 	arg_str := g.out.after(arg_start_pos)
-	if it.no_body || (g.pref.use_cache && it.is_builtin) || skip {
+	if it.no_body ||
+		((g.pref.use_cache && g.pref.build_mode != .build_module) && it.is_builtin) || skip {
 		// Just a function header. Builtin function bodies are defined in builtin.o
 		g.definitions.writeln(');') // // NO BODY')
 		g.writeln(');')
@@ -254,6 +255,11 @@ fn (mut g Gen) call_expr(node ast.CallExpr) {
 	if node.left is ast.AnonFn {
 		g.expr(node.left)
 	}
+	if node.left is ast.IndexExpr && node.name == '' {
+		g.is_fn_index_call = true
+		g.expr(node.left)
+		g.is_fn_index_call = false
+	}
 	if node.should_be_skipped {
 		return
 	}
@@ -364,6 +370,10 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 				g.gen_array_prepend(node)
 				return
 			}
+			'contains' {
+				g.gen_array_contains(node)
+				return
+			}
 			else {}
 		}
 	}
@@ -377,6 +387,9 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 		g.gen_str_for_type(node.receiver_type)
 	}
 	mut has_cast := false
+	if left_sym.kind == .map && node.name == 'clone' {
+		receiver_type_name = 'map'
+	}
 	// TODO performance, detect `array` method differently
 	if left_sym.kind == .array && node.name in
 		['repeat', 'sort_with_compare', 'free', 'push_many', 'trim', 'first', 'last', 'pop', 'clone', 'reverse', 'slice'] {
