@@ -163,26 +163,26 @@ mut:
 	shared_postfix   string // .so, .dll
 	//
 	//
-	debug_mode       bool
-	is_cc_tcc        bool
-	is_cc_gcc        bool
-	is_cc_msvc       bool
-	is_cc_clang      bool
+	debug_mode  bool
+	is_cc_tcc   bool
+	is_cc_gcc   bool
+	is_cc_msvc  bool
+	is_cc_clang bool
 	//
-	env_cflags       string // prepended *before* everything else
-	env_ldflags      string // appended *after* everything else
+	env_cflags  string // prepended *before* everything else
+	env_ldflags string // appended *after* everything else
 	//
-	args             []string // ordinary C options like `-O2`
-	wargs            []string // for `-Wxyz` *exclusively*
-	o_args           []string // for `-o target`
-	post_args        []string // options that should go after .o_args
-	linker_flags     []string // `-lm`
+	args         []string // ordinary C options like `-O2`
+	wargs        []string // for `-Wxyz` *exclusively*
+	o_args       []string // for `-o target`
+	post_args    []string // options that should go after .o_args
+	linker_flags []string // `-lm`
 }
 
 fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	mut ccoptions := CcompilerOptions{}
 	//
-	mut debug_options := '-g3'
+	mut debug_options := '-g'
 	mut optimization_options := '-O2'
 	// arguments for the C compiler
 	// TODO : activate -Werror once no warnings remain
@@ -231,7 +231,7 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	}
 	if ccoptions.is_cc_clang {
 		if ccoptions.debug_mode {
-			debug_options = '-g3 -O0'
+			debug_options = '-g -O0'
 		}
 		optimization_options = '-O3'
 		mut have_flto := true
@@ -244,7 +244,7 @@ fn (mut v Builder) setup_ccompiler_options(ccompiler string) {
 	}
 	if ccoptions.is_cc_gcc {
 		if ccoptions.debug_mode {
-			debug_options = '-g3 -no-pie'
+			debug_options = '-g -no-pie'
 		}
 		optimization_options = '-O3 -fno-strict-aliasing -flto'
 	}
@@ -510,7 +510,7 @@ fn (mut v Builder) cc() {
 		if v.pref.os == .ios {
 			ios_sdk := if v.pref.is_ios_simulator { 'iphonesimulator' } else { 'iphoneos' }
 			ios_sdk_path_res := os.exec('xcrun --sdk $ios_sdk --show-sdk-path') or {
-				panic("Couldn\'t find iphonesimulator")
+				panic("Couldn't find iphonesimulator")
 			}
 			mut isysroot := ios_sdk_path_res.output.replace('\n', '')
 			ccompiler = 'xcrun --sdk iphoneos clang -isysroot $isysroot'
@@ -591,6 +591,12 @@ fn (mut v Builder) cc() {
 			v.pref.cleanup_files << v.out_name_c
 			v.pref.cleanup_files << response_file
 		}
+		$if windows {
+			if v.ccoptions.is_cc_tcc {
+				def_name := v.pref.out_name[0..v.pref.out_name.len - 4]
+				v.pref.cleanup_files << '${def_name}.def'
+			}
+		}
 		//
 		todo()
 		os.chdir(vdir)
@@ -611,6 +617,9 @@ fn (mut v Builder) cc() {
 			v.show_c_compiler_output(res)
 		}
 		os.chdir(original_pwd)
+		$if trace_use_cache ? {
+			eprintln('>>>> v.pref.use_cache: $v.pref.use_cache | v.pref.retry_compilation: $v.pref.retry_compilation | cmd res.exit_code: $res.exit_code | cmd: $cmd')
+		}
 		if res.exit_code != 0 {
 			if ccompiler.contains('tcc.exe') {
 				// a TCC problem? Retry with the system cc:
@@ -621,9 +630,13 @@ fn (mut v Builder) cc() {
 					}
 					exit(101)
 				}
-				v.pref.ccompiler = pref.default_c_compiler()
-				eprintln('Compilation with tcc failed. Retrying with $v.pref.ccompiler ...')
-				continue
+				if v.pref.retry_compilation {
+					v.pref.ccompiler = pref.default_c_compiler()
+					if v.pref.is_verbose {
+						eprintln('Compilation with tcc failed. Retrying with $v.pref.ccompiler ...')
+					}
+					continue
+				}
 			}
 			if res.exit_code == 127 {
 				verror('C compiler error, while attempting to run: \n' +
@@ -778,7 +791,11 @@ fn (mut c Builder) cc_windows_cross() {
 	//
 	cflags := c.get_os_cflags()
 	// -I flags
-	args += if c.pref.ccompiler == 'msvc' { cflags.c_options_before_target_msvc() } else { cflags.c_options_before_target() }
+	args += if c.pref.ccompiler == 'msvc' {
+		cflags.c_options_before_target_msvc()
+	} else {
+		cflags.c_options_before_target()
+	}
 	mut optimization_options := ''
 	mut debug_options := ''
 	if c.pref.is_prod {
@@ -804,7 +821,11 @@ fn (mut c Builder) cc_windows_cross() {
 	// add the thirdparty .o files, produced by all the #flag directives:
 	args += ' ' + cflags.c_options_only_object_files() + ' '
 	args += ' $c.out_name_c '
-	args += if c.pref.ccompiler == 'msvc' { cflags.c_options_after_target_msvc() } else { cflags.c_options_after_target() }
+	args += if c.pref.ccompiler == 'msvc' {
+		cflags.c_options_after_target_msvc()
+	} else {
+		cflags.c_options_after_target()
+	}
 	/*
 	winroot := '${pref.default_module_path}/winroot'
 	if !os.is_dir(winroot) {

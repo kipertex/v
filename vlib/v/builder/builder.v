@@ -12,15 +12,15 @@ import v.depgraph
 
 pub struct Builder {
 pub:
-	compiled_dir        string // contains os.real_path() of the dir of the final file beeing compiled, or the dir itself when doing `v .`
-	module_path         string
+	compiled_dir string // contains os.real_path() of the dir of the final file beeing compiled, or the dir itself when doing `v .`
+	module_path  string
 mut:
-	pref                &pref.Preferences
-	checker             checker.Checker
-	global_scope        &ast.Scope
-	out_name_c          string
-	out_name_js         string
-	max_nr_errors       int = 100
+	pref          &pref.Preferences
+	checker       checker.Checker
+	global_scope  &ast.Scope
+	out_name_c    string
+	out_name_js   string
+	max_nr_errors int = 100
 pub mut:
 	module_search_paths []string
 	parsed_files        []ast.File
@@ -289,7 +289,11 @@ fn (b &Builder) print_warnings_and_errors() {
 	}
 	if b.checker.nr_warnings > 0 && !b.pref.skip_warnings {
 		for i, err in b.checker.warnings {
-			kind := if b.pref.is_verbose { '$err.reporter warning #$b.checker.nr_warnings:' } else { 'warning:' }
+			kind := if b.pref.is_verbose {
+				'$err.reporter warning #$b.checker.nr_warnings:'
+			} else {
+				'warning:'
+			}
 			ferror := util.formatted_error(kind, err.message, err.file_path, err.pos)
 			eprintln(ferror)
 			if err.details.len > 0 {
@@ -307,7 +311,11 @@ fn (b &Builder) print_warnings_and_errors() {
 	}
 	if b.checker.nr_errors > 0 {
 		for i, err in b.checker.errors {
-			kind := if b.pref.is_verbose { '$err.reporter error #$b.checker.nr_errors:' } else { 'error:' }
+			kind := if b.pref.is_verbose {
+				'$err.reporter error #$b.checker.nr_errors:'
+			} else {
+				'error:'
+			}
 			ferror := util.formatted_error(kind, err.message, err.file_path, err.pos)
 			eprintln(ferror)
 			if err.details.len > 0 {

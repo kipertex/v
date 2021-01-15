@@ -5,7 +5,7 @@ module strings
 
 pub struct Builder {
 mut:
-	buf          []byte
+	buf []byte
 pub mut:
 	len          int
 	initial_size int = 1
@@ -37,7 +37,7 @@ pub fn (mut b Builder) writeln(s string) {
 }
 
 pub fn (b Builder) str() string {
-	return unsafe {byteptr(b.buf.data).vstring_with_len(b.len)}
+	return unsafe { byteptr(b.buf.data).vstring_with_len(b.len) }
 }
 
 pub fn (mut b Builder) cut(n int) {

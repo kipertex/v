@@ -43,8 +43,8 @@ NB: A V string should be/is immutable from the point of view of
 */
 pub struct string {
 pub:
-	str    byteptr // points to a C style 0 terminated string of bytes.
-	len    int // the length of the .str field, excluding the ending 0 byte. It is always equal to strlen(.str).
+	str byteptr // points to a C style 0 terminated string of bytes.
+	len int     // the length of the .str field, excluding the ending 0 byte. It is always equal to strlen(.str).
 mut:
 	is_lit int
 }
@@ -68,7 +68,7 @@ pub mut:
 // vstrlen returns the V length of the C string `s` (0 terminator is not counted).
 [unsafe]
 pub fn vstrlen(s byteptr) int {
-	return unsafe {C.strlen(charptr(s))}
+	return unsafe { C.strlen(charptr(s)) }
 }
 
 // tos converts a C string to a V string.
@@ -109,7 +109,7 @@ pub fn tos3(s charptr) string {
 	}
 	return string{
 		str: byteptr(s)
-		len: unsafe {C.strlen(s)}
+		len: unsafe { C.strlen(s) }
 	}
 }
 
@@ -134,7 +134,7 @@ pub fn tos_lit(s charptr) string {
 	eprintln('warning: `tos_lit` has been deprecated, use `_SLIT` instead')
 	return string{
 		str: byteptr(s)
-		len: unsafe {C.strlen(s)}
+		len: unsafe { C.strlen(s) }
 		is_lit: 1
 	}
 }
@@ -144,7 +144,7 @@ pub fn tos_lit(s charptr) string {
 pub fn (bp byteptr) vstring() string {
 	return string{
 		str: bp
-		len: unsafe {C.strlen(charptr(bp))}
+		len: unsafe { C.strlen(charptr(bp)) }
 	}
 }
 
@@ -162,7 +162,7 @@ pub fn (bp byteptr) vstring_with_len(len int) string {
 pub fn (cp charptr) vstring() string {
 	return string{
 		str: byteptr(cp)
-		len: unsafe {C.strlen(cp)}
+		len: unsafe { C.strlen(cp) }
 	}
 }
 
@@ -188,7 +188,7 @@ pub fn (a string) clone() string {
 		return ''
 	}
 	mut b := string{
-		str: unsafe {malloc(a.len + 1)}
+		str: unsafe { malloc(a.len + 1) }
 		len: a.len
 	}
 	unsafe {
@@ -212,8 +212,11 @@ pub fn cstring_to_vstring(cstr byteptr) string {
 
 // replace_once replaces the first occurence of `rep` with the string passed in `with`.
 pub fn (s string) replace_once(rep string, with string) string {
-	index := s.index(rep) or { return s.clone() }
-	return s.substr(0, index) + with + s.substr(index + rep.len, s.len)
+	idx := s.index_(rep)
+	if idx == -1 {
+		return s.clone()
+	}
+	return s.substr(0, idx) + with + s.substr(idx + rep.len, s.len)
 }
 
 // replace replaces all occurences of `rep` with the string passed in `with`.
@@ -225,7 +228,7 @@ pub fn (s string) replace(rep string, with string) string {
 	// Get locations of all reps within this string
 	mut idxs := []int{}
 	defer {
-		unsafe {idxs.free()}
+		unsafe { idxs.free() }
 	}
 	mut idx := 0
 	for {
@@ -529,7 +532,7 @@ pub fn (s string) split_nth(delim string, nth int) []string {
 				res << s.right(i)
 				break
 			}
-			res << ch.str()
+			res << ch.ascii_str()
 			i++
 		}
 		return res
@@ -567,8 +570,8 @@ pub fn (s string) split_into_lines() []string {
 	}
 	mut start := 0
 	for i := 0; i < s.len; i++ {
-		is_lf := unsafe {s.str[i]} == `\n`
-		is_crlf := i != s.len - 1 && unsafe {s.str[i] == `\r` && s.str[i + 1] == `\n`}
+		is_lf := unsafe { s.str[i] } == `\n`
+		is_crlf := i != s.len - 1 && unsafe { s.str[i] == `\r` && s.str[i + 1] == `\n` }
 		is_eol := is_lf || is_crlf
 		is_last := if is_crlf { i == s.len - 2 } else { i == s.len - 1 }
 		if is_eol || is_last {
@@ -643,15 +646,19 @@ pub fn (s string) substr(start int, end int) string {
 	return res
 }
 
-// TODO should probably be deprecated? Not used in the V code base (df4ec89a0)
-pub fn (s string) index_old(p string) int {
+// index returns the position of the first character of the input string.
+// It will return `-1` if the input string can't be found.
+fn (s string) index_(p string) int {
 	if p.len > s.len || p.len == 0 {
 		return -1
+	}
+	if p.len > 2 {
+		return s.index_kmp(p)
 	}
 	mut i := 0
 	for i < s.len {
 		mut j := 0
-		for j < p.len && unsafe {s.str[i + j] == p.str[j]} {
+		for j < p.len && unsafe { s.str[i + j] == p.str[j] } {
 			j++
 		}
 		if j == p.len {
@@ -665,21 +672,11 @@ pub fn (s string) index_old(p string) int {
 // index returns the position of the first character of the input string.
 // It will return `none` if the input string can't be found.
 pub fn (s string) index(p string) ?int {
-	if p.len > s.len || p.len == 0 {
+	idx := s.index_(p)
+	if idx == -1 {
 		return none
 	}
-	mut i := 0
-	for i < s.len {
-		mut j := 0
-		for j < p.len && unsafe {s.str[i + j] == p.str[j]} {
-			j++
-		}
-		if j == p.len {
-			return i
-		}
-		i++
-	}
-	return none
+	return idx
 }
 
 // index_kmp does KMP search.
@@ -690,20 +687,20 @@ fn (s string) index_kmp(p string) int {
 	mut prefix := []int{len: p.len}
 	mut j := 0
 	for i := 1; i < p.len; i++ {
-		for unsafe {p.str[j] != p.str[i]} && j > 0 {
+		for unsafe { p.str[j] != p.str[i] } && j > 0 {
 			j = prefix[j - 1]
 		}
-		if unsafe {p.str[j] == p.str[i]} {
+		if unsafe { p.str[j] == p.str[i] } {
 			j++
 		}
 		prefix[i] = j
 	}
 	j = 0
 	for i in 0 .. s.len {
-		for unsafe {p.str[j] != s.str[i]} && j > 0 {
+		for unsafe { p.str[j] != s.str[i] } && j > 0 {
 			j = prefix[j - 1]
 		}
-		if unsafe {p.str[j] == s.str[i]} {
+		if unsafe { p.str[j] == s.str[i] } {
 			j++
 		}
 		if j == p.len {
@@ -716,21 +713,24 @@ fn (s string) index_kmp(p string) int {
 // index_any returns the position of any of the characters in the input string - if found.
 pub fn (s string) index_any(chars string) int {
 	for c in chars {
-		index := s.index(c.str()) or { continue }
-		return index
+		idx := s.index_(c.ascii_str())
+		if idx == -1 {
+			continue
+		}
+		return idx
 	}
 	return -1
 }
 
 // last_index returns the position of the last occurence of the input string.
-pub fn (s string) last_index(p string) ?int {
+fn (s string) last_index_(p string) int {
 	if p.len > s.len || p.len == 0 {
-		return none
+		return -1
 	}
 	mut i := s.len - p.len
 	for i >= 0 {
 		mut j := 0
-		for j < p.len && unsafe {s.str[i + j] == p.str[j]} {
+		for j < p.len && unsafe { s.str[i + j] == p.str[j] } {
 			j++
 		}
 		if j == p.len {
@@ -738,7 +738,16 @@ pub fn (s string) last_index(p string) ?int {
 		}
 		i--
 	}
-	return none
+	return -1
+}
+
+// last_index returns the position of the last occurence of the input string.
+pub fn (s string) last_index(p string) ?int {
+	idx := s.last_index_(p)
+	if idx == -1 {
+		return none
+	}
+	return idx
 }
 
 // index_after returns the position of the input string, starting search from `start` position.
@@ -757,7 +766,7 @@ pub fn (s string) index_after(p string, start int) int {
 	for i < s.len {
 		mut j := 0
 		mut ii := i
-		for j < p.len && unsafe {s.str[ii] == p.str[j]} {
+		for j < p.len && unsafe { s.str[ii] == p.str[j] } {
 			j++
 			ii++
 		}
@@ -773,7 +782,7 @@ pub fn (s string) index_after(p string, start int) int {
 // index_byte returns -1 if the byte can not be found.
 pub fn (s string) index_byte(c byte) int {
 	for i in 0 .. s.len {
-		if unsafe {s.str[i]} == c {
+		if unsafe { s.str[i] } == c {
 			return i
 		}
 	}
@@ -784,7 +793,7 @@ pub fn (s string) index_byte(c byte) int {
 // last_index_byte returns -1 if the byte is not found.
 pub fn (s string) last_index_byte(c byte) int {
 	for i := s.len - 1; i >= 0; i-- {
-		if unsafe {s.str[i] == c} {
+		if unsafe { s.str[i] == c } {
 			return i
 		}
 	}
@@ -818,14 +827,16 @@ pub fn (s string) contains(substr string) bool {
 	if substr.len == 0 {
 		return true
 	}
-	s.index(substr) or { return false }
+	if s.index_(substr) == -1 {
+		return false
+	}
 	return true
 }
 
 // contains_any returns `true` if the string contains any chars in `chars`.
 pub fn (s string) contains_any(chars string) bool {
 	for c in chars {
-		if c.str() in s {
+		if c.ascii_str() in s {
 			return true
 		}
 	}
@@ -851,7 +862,7 @@ pub fn (s string) starts_with(p string) bool {
 		return false
 	}
 	for i in 0 .. p.len {
-		if unsafe {s.str[i] != p.str[i]} {
+		if unsafe { s.str[i] != p.str[i] } {
 			return false
 		}
 	}
@@ -923,7 +934,7 @@ pub fn (s string) capitalize() string {
 	if s.len == 0 {
 		return ''
 	}
-	return s[0].str().to_upper() + s[1..]
+	return s[0].ascii_str().to_upper() + s[1..]
 	// sl := s.to_lower()
 	// cap := sl[0].str().to_upper() + sl.right(1)
 	// return cap
@@ -970,10 +981,16 @@ pub fn (s string) is_title() bool {
 // find_between returns the string found between `start` string and `end` string.
 // Example: assert 'hey [man] how you doin'.find_between('[', ']') == 'man'
 pub fn (s string) find_between(start string, end string) string {
-	start_pos := s.index(start) or { return '' }
+	start_pos := s.index_(start)
+	if start_pos == -1 {
+		return ''
+	}
 	// First get everything to the right of 'start'
 	val := s.right(start_pos + start.len)
-	end_pos := val.index(end) or { return val }
+	end_pos := val.index_(end)
+	if end_pos == -1 {
+		return val
+	}
 	return val.left(end_pos)
 }
 
@@ -1152,7 +1169,7 @@ pub fn (s string) ustring() ustring {
 		runes: __new_array(0, s.len, int(sizeof(int)))
 	}
 	for i := 0; i < s.len; i++ {
-		char_len := utf8_char_len(unsafe {s.str[i]})
+		char_len := utf8_char_len(unsafe { s.str[i] })
 		res.runes << i
 		i += char_len - 1
 		res.len++
@@ -1176,7 +1193,7 @@ pub fn (s string) ustring_tmp() ustring {
 	res.runes.len = s.len
 	mut j := 0
 	for i := 0; i < s.len; i++ {
-		char_len := utf8_char_len(unsafe {s.str[i]})
+		char_len := utf8_char_len(unsafe { s.str[i] })
 		res.runes[j] = i
 		j++
 		i += char_len - 1
@@ -1226,14 +1243,14 @@ pub fn (u ustring) add(a ustring) ustring {
 	}
 	mut j := 0
 	for i := 0; i < u.s.len; i++ {
-		char_len := utf8_char_len(unsafe {u.s.str[i]})
+		char_len := utf8_char_len(unsafe { u.s.str[i] })
 		res.runes << j
 		i += char_len - 1
 		j += char_len
 		res.len++
 	}
 	for i := 0; i < a.s.len; i++ {
-		char_len := utf8_char_len(unsafe {a.s.str[i]})
+		char_len := utf8_char_len(unsafe { a.s.str[i] })
 		res.runes << j
 		i += char_len - 1
 		j += char_len
@@ -1407,28 +1424,40 @@ pub fn (s &string) free() {
 // all_before returns the contents before `dot` in the string.
 // Example: assert '23:34:45.234'.all_before('.') == '23:34:45'
 pub fn (s string) all_before(dot string) string {
-	pos := s.index(dot) or { return s }
+	pos := s.index_(dot)
+	if pos == -1 {
+		return s
+	}
 	return s.left(pos)
 }
 
 // all_before_last returns the contents before the last occurence of `dot` in the string.
 // Example: assert '23:34:45.234'.all_before_last(':') == '23:34'
 pub fn (s string) all_before_last(dot string) string {
-	pos := s.last_index(dot) or { return s }
+	pos := s.last_index_(dot)
+	if pos == -1 {
+		return s
+	}
 	return s.left(pos)
 }
 
 // all_after returns the contents after `dot` in the string.
 // Example: assert '23:34:45.234'.all_after('.') == '234'
 pub fn (s string) all_after(dot string) string {
-	pos := s.index(dot) or { return s }
+	pos := s.index_(dot)
+	if pos == -1 {
+		return s
+	}
 	return s.right(pos + dot.len)
 }
 
 // all_after_last returns the contents after the last occurence of `dot` in the string.
 // Example: assert '23:34:45.234'.all_after_last(':') == '45.234'
 pub fn (s string) all_after_last(dot string) string {
-	pos := s.last_index(dot) or { return s }
+	pos := s.last_index_(dot)
+	if pos == -1 {
+		return s
+	}
 	return s.right(pos + dot.len)
 }
 
@@ -1555,7 +1584,7 @@ pub fn (s string) bytes() []byte {
 		return []
 	}
 	mut buf := []byte{len: s.len}
-	unsafe {C.memcpy(buf.data, s.str, s.len)}
+	unsafe { C.memcpy(buf.data, s.str, s.len) }
 	return buf
 }
 
@@ -1650,4 +1679,35 @@ pub fn (s string) strip_margin_custom(del byte) string {
 		ret[count] = 0
 		return ret.vstring_with_len(count)
 	}
+}
+
+// split_by_whitespace - extract only the non whitespace tokens/words from the given string `s`.
+// example: '  sss   ssss'.split_by_whitespace() => ['sss', 'ssss']
+pub fn (s string) split_by_whitespace() []string {
+	mut res := []string{}
+	mut word_start := 0
+	mut word_end := 0
+	mut is_in_word := false
+	mut is_space := false
+	for i, c in s {
+		is_space = c in [` `, `\t`, `\n`]
+		if !is_in_word && !is_space {
+			word_start = i
+			is_in_word = true
+			continue
+		}
+		if is_space && is_in_word {
+			word_end = i
+			res << s[word_start..word_end]
+			is_in_word = false
+			word_end = 0
+			word_start = 0
+			continue
+		}
+	}
+	if is_in_word && word_start > 0 {
+		// collect the remainder word at the end
+		res << s[word_start..s.len]
+	}
+	return res
 }
